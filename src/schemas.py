@@ -26,7 +26,7 @@ class SparseEncoderSchema(BaseModel):
     shared_hidden_dims: list[int] = Field(default=[256, 256])
     adapter_dim: int = Field(64, ge=1, description="Per-building adapter hidden dim")
     activation: str = Field("relu", pattern=r"^(relu|gelu|tanh)$")
-    sparsity_method: str = Field("l1_penalty", pattern=r"^(l1_penalty|topk|proximal)$")
+    sparsity_method: str = Field("topk", pattern=r"^(l1_penalty|topk|proximal)$")
     topk_k: int = Field(
         16, ge=1, description="If sparsity_method=topk, keep top-k activations"
     )

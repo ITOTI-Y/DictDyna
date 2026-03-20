@@ -120,6 +120,7 @@ class DynaSACTrainer:
         episode_rewards: list[float] = []
         self._recent_episode_rewards: list[float] = []
         eval_history: list[dict] = []
+        diagnostics: list[dict] = []
 
         logger.info(
             f"Starting training: {total_steps} steps, "
@@ -152,6 +153,10 @@ class DynaSACTrainer:
                 )
             else:
                 self.dyna.buffer.add_real(obs, action, float(reward), next_obs, done)
+
+            # Save diagnostics periodically
+            if step % (log_interval * 10) == 0 and metrics:
+                diagnostics.append({"step": step, **metrics})
 
             episode_reward += float(reward)
             obs = next_obs
@@ -190,7 +195,7 @@ class DynaSACTrainer:
                     )
                 self.dyna.save(self.save_dir / f"checkpoint_step{step}.pt")
 
-        self._save_results(episode_rewards, eval_history)
+        self._save_results(episode_rewards, eval_history, diagnostics)
         self.env.close()
         if run:
             run.finish()
@@ -207,10 +212,16 @@ class DynaSACTrainer:
         return {"mean_reward": 0.0, "std_reward": 0.0}
 
     def _save_results(
-        self, episode_rewards: list[float], eval_history: list[dict]
+        self,
+        episode_rewards: list[float],
+        eval_history: list[dict],
+        diagnostics: list[dict] | None = None,
     ) -> None:
         self.dyna.save(self.save_dir / "final_checkpoint.pt")
         np.save(self.save_dir / "episode_rewards.npy", np.array(episode_rewards))
         with open(self.save_dir / "eval_history.json", "w") as f:
             json.dump(eval_history, f, indent=2)
+        if diagnostics:
+            with open(self.save_dir / "diagnostics.json", "w") as f:
+                json.dump(diagnostics, f, indent=2)
         logger.info(f"Results saved to {self.save_dir}")

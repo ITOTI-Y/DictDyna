@@ -204,6 +204,13 @@ class DynaSAC:
                 rollout_data["dones"],
             )
 
+            # Diagnostics: rollout data quality
+            metrics["diag/model_reward_mean"] = float(rollout_data["rewards"].mean())
+            metrics["diag/model_reward_std"] = float(rollout_data["rewards"].std())
+            metrics["diag/model_state_std"] = float(rollout_data["next_states"].std())
+            metrics["diag/real_reward"] = reward
+            metrics["diag/model_buf_size"] = float(self.buffer.model_size)
+
         # 4. SAC update (pure real data during warmup, mixed after)
         model_ratio = self.config.dyna.model_to_real_ratio if use_model else 0.0
         mixed_batch = self.buffer.sample(
@@ -219,6 +226,10 @@ class DynaSAC:
             mixed_batch["dones"],
         )
         metrics.update({f"sac/{k}": v for k, v in sac_metrics.items()})
+
+        # Diagnostics: SAC internals
+        metrics["diag/alpha"] = sac_metrics.get("alpha", 0.0)
+        metrics["diag/real_buf_size"] = float(self.buffer.real_size)
 
         return metrics
 
