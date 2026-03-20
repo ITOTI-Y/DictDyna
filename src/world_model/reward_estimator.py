@@ -4,22 +4,21 @@ import torch
 
 
 class SinergymRewardEstimator:
-    """Estimate reward from predicted state in Sinergym environments.
+    """Estimate Sinergym LinearReward from predicted state.
 
-    Sinergym rewards are typically:
-        r = -w_E * E_t - (1 - w_E) * comfort_penalty(T_indoor, T_target)
+    Sinergym LinearReward formula:
+        R = -W * lambda_E * power - (1-W) * lambda_T * comfort_violation
 
-    Both E_t (HVAC power) and T_indoor are state variables, so reward
-    can be computed directly from world model predictions.
-
-    When the world model operates in normalized obs space, predicted states
-    must be denormalized before computing reward (temperature thresholds
-    and power values are in raw units).
+    Comfort range depends on season (determined by month variable):
+        Summer (Jun-Sep): [23, 26], Winter: [20, 23.5]
 
     Args:
-        comfort_weight: Weight for comfort penalty (1 - energy_weight).
-        temp_target: Target indoor temperature (C).
-        temp_band: Acceptable temperature range around target.
+        energy_weight: W in the formula (default 0.5).
+        lambda_energy: Scaling factor for energy (default 0.0001).
+        lambda_temp: Scaling factor for temperature violation (default 1.0).
+        range_comfort_summer: [T_low, T_high] for summer.
+        range_comfort_winter: [T_low, T_high] for winter.
+        summer_months: (start_month, end_month) inclusive.
         state_indices: Mapping of variable name to state vector index.
         obs_mean: Observation mean for denormalization (None = raw space).
         obs_std: Observation std for denormalization (None = raw space).
@@ -27,17 +26,27 @@ class SinergymRewardEstimator:
 
     def __init__(
         self,
-        comfort_weight: float = 0.5,
-        temp_target: float = 23.0,
-        temp_band: float = 2.0,
+        energy_weight: float = 0.5,
+        lambda_energy: float = 0.0001,
+        lambda_temp: float = 1.0,
+        range_comfort_summer: tuple[float, float] = (23.0, 26.0),
+        range_comfort_winter: tuple[float, float] = (20.0, 23.5),
+        summer_months: tuple[int, int] = (6, 9),
         state_indices: dict[str, int] | None = None,
         obs_mean: torch.Tensor | None = None,
         obs_std: torch.Tensor | None = None,
     ) -> None:
-        self.comfort_weight = comfort_weight
-        self.temp_target = temp_target
-        self.temp_band = temp_band
-        self.state_indices = state_indices or {}
+        self.W = energy_weight
+        self.lambda_energy = lambda_energy
+        self.lambda_temp = lambda_temp
+        self.range_summer = range_comfort_summer
+        self.range_winter = range_comfort_winter
+        self.summer_months = summer_months
+        self.state_indices = state_indices or {
+            "month": 0,
+            "indoor_temp": 9,
+            "hvac_power": 15,
+        }
         self.obs_mean = obs_mean
         self.obs_std = obs_std
 
@@ -46,12 +55,11 @@ class SinergymRewardEstimator:
 
         Args:
             predicted_state: World model output, shape (batch, d).
-                May be in normalized space if obs_mean/obs_std are set.
 
         Returns:
             Estimated reward, shape (batch,).
         """
-        # Denormalize if needed (reward thresholds are in raw units)
+        # Denormalize if needed
         if self.obs_mean is not None and self.obs_std is not None:
             state_raw = predicted_state * self.obs_std.to(
                 predicted_state.device
@@ -59,17 +67,27 @@ class SinergymRewardEstimator:
         else:
             state_raw = predicted_state
 
-        idx_temp = self.state_indices.get("indoor_temp", 0)
-        idx_power = self.state_indices.get("hvac_power", 1)
+        month = state_raw[:, self.state_indices["month"]]
+        temp = state_raw[:, self.state_indices["indoor_temp"]]
+        power = state_raw[:, self.state_indices["hvac_power"]]
 
-        temp = state_raw[:, idx_temp]
-        power = state_raw[:, idx_power]
+        # Seasonal comfort range
+        is_summer = (month >= self.summer_months[0]) & (month <= self.summer_months[1])
+        t_low = torch.where(
+            is_summer,
+            torch.tensor(self.range_summer[0], device=temp.device),
+            torch.tensor(self.range_winter[0], device=temp.device),
+        )
+        t_high = torch.where(
+            is_summer,
+            torch.tensor(self.range_summer[1], device=temp.device),
+            torch.tensor(self.range_winter[1], device=temp.device),
+        )
 
-        # Comfort penalty: 0 inside band, linear outside
-        comfort_violation = torch.relu(
-            temp - (self.temp_target + self.temp_band)
-        ) + torch.relu((self.temp_target - self.temp_band) - temp)
+        comfort_violation = torch.relu(temp - t_high) + torch.relu(t_low - temp)
 
-        energy_weight = 1.0 - self.comfort_weight
-        reward = -(energy_weight * power + self.comfort_weight * comfort_violation)
+        reward = (
+            -self.W * self.lambda_energy * power
+            - (1 - self.W) * self.lambda_temp * comfort_violation
+        )
         return reward

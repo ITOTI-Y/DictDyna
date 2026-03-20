@@ -79,9 +79,6 @@ class DynaSAC:
 
         # Build reward estimator (denormalizes predicted states for reward calc)
         self.reward_estimator = SinergymRewardEstimator(
-            comfort_weight=config.reward.comfort_weight,
-            temp_target=config.reward.temp_target,
-            temp_band=config.reward.temp_band,
             obs_mean=obs_mean,
             obs_std=obs_std,
         )

@@ -115,35 +115,32 @@ class TestDictDynamicsModel:
 
 class TestSinergymRewardEstimator:
     def test_reward_from_state(self):
-        estimator = SinergymRewardEstimator(
-            comfort_weight=0.5,
-            temp_target=23.0,
-            temp_band=2.0,
-            state_indices={"indoor_temp": 4, "hvac_power": 5},
-        )
-        # Create state where temp is within comfort band and power is low
-        state = torch.zeros(4, STATE_DIM)
-        state[:, 4] = 23.0  # indoor_temp = target
-        state[:, 5] = 0.5  # low hvac power
+        # Sinergym 5zone: dim 0=month, dim 9=indoor_temp, dim 15=hvac_power
+        # Need at least 16 dims for default indices
+        d = 17
+        estimator = SinergymRewardEstimator()
+        # Winter month (Jan), temp=22 within winter range [20,23.5], power=1000W
+        state = torch.zeros(4, d)
+        state[:, 0] = 1.0  # month = January (winter)
+        state[:, 9] = 22.0  # indoor temp within winter range
+        state[:, 15] = 1000.0  # HVAC power
 
         reward = estimator.estimate(state)
         assert reward.shape == (4,)
-        # No comfort violation, only energy cost
-        expected = -(0.5 * 0.5)  # -energy_weight * power
+        # No comfort violation, only energy: -0.5 * 0.0001 * 1000 = -0.05
+        expected = -(0.5 * 0.0001 * 1000.0)
         torch.testing.assert_close(reward, torch.full((4,), expected))
 
     def test_comfort_violation(self):
-        estimator = SinergymRewardEstimator(
-            comfort_weight=0.5,
-            temp_target=23.0,
-            temp_band=2.0,
-            state_indices={"indoor_temp": 0, "hvac_power": 1},
-        )
-        state = torch.zeros(1, STATE_DIM)
-        state[0, 0] = 28.0  # 3 degrees above upper band (25)
-        state[0, 1] = 0.0  # no power
+        d = 17
+        estimator = SinergymRewardEstimator()
+        state = torch.zeros(1, d)
+        state[0, 0] = 7.0  # month = July (summer, range [23,26])
+        state[0, 9] = 29.0  # 3 degrees above upper band (26)
+        state[0, 15] = 0.0  # no power
 
         reward = estimator.estimate(state)
-        # Comfort violation = 28 - 25 = 3, energy = 0
-        expected = -(0.5 * 3.0)
+        # Comfort violation = 29 - 26 = 3, lambda_temp=1.0
+        # R = -0.5 * 1.0 * 3.0 = -1.5
+        expected = -(0.5 * 1.0 * 3.0)
         torch.testing.assert_close(reward, torch.tensor([expected]))

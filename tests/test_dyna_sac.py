@@ -17,7 +17,7 @@ from src.world_model.dict_dynamics import DictDynamicsModel
 from src.world_model.reward_estimator import SinergymRewardEstimator
 from src.world_model.sparse_encoder import SparseEncoder
 
-STATE_DIM = 10
+STATE_DIM = 17  # Match Sinergym 5zone obs dim (reward estimator needs idx 9,15)
 ACTION_DIM = 2
 N_ATOMS = 32
 
