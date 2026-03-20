@@ -53,6 +53,7 @@ def pretrain_dictionary(
     n_nonzero: int = 10,
     max_iter: int = 50,
     output_path: str | Path = "output/pretrained/dict.pt",
+    transitions_dir: str | Path = "data/offline_rollouts",
 ) -> torch.Tensor:
     """Run the full pretraining pipeline.
 
@@ -87,14 +88,36 @@ def pretrain_dictionary(
     else:
         raise ValueError(f"Unknown method: {method}")
 
+    # Compute observation stats from raw transitions (for obs normalization)
+    transitions_dir = Path(transitions_dir)
+    obs_mean_t = torch.zeros(data.shape[1], dtype=torch.float32)
+    obs_std_t = torch.ones(data.shape[1], dtype=torch.float32)
+    if transitions_dir.exists():
+        all_states = []
+        for f in sorted(transitions_dir.glob("*_transitions.npz")):
+            t = np.load(f)
+            if "states" in t and t["states"].shape[1] == data.shape[1]:
+                all_states.append(t["states"])
+        if all_states:
+            states_all = np.concatenate(all_states, axis=0)
+            obs_mean_t = torch.tensor(states_all.mean(axis=0), dtype=torch.float32)
+            obs_std_t = torch.tensor(
+                np.maximum(states_all.std(axis=0), 1e-8), dtype=torch.float32
+            )
+            logger.info(
+                f"Computed obs stats from {len(all_states)} buildings, {len(states_all)} samples"
+            )
+
     # Save
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "dictionary": dict_tensor,
-            "mean": torch.tensor(mean, dtype=torch.float32),
-            "std": torch.tensor(std, dtype=torch.float32),
+            "mean": torch.tensor(mean, dtype=torch.float32),  # diff stats
+            "std": torch.tensor(std, dtype=torch.float32),  # diff stats
+            "obs_mean": obs_mean_t,  # observation stats
+            "obs_std": obs_std_t,  # observation stats
             "n_atoms": n_atoms,
             "method": method,
         },

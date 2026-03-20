@@ -16,6 +16,7 @@ from src.utils import sinergym_workdir
 with contextlib.suppress(ImportError):
     import sinergym  # noqa: F401 — registers Sinergym envs with gymnasium
 
+from src.agent.obs_normalizer import RunningNormalizer
 from src.agent.replay_buffer import ReplayBuffer
 from src.agent.sac import GaussianActor, SACTrainer, SoftQNetwork
 from src.utils import get_device, seed_everything
@@ -87,6 +88,9 @@ class SACBaselineTrainer:
         self.action_scale = (action_high - action_low) / 2.0
         self.action_bias = (action_high + action_low) / 2.0
 
+        # Observation normalizer
+        self.obs_normalizer = RunningNormalizer(shape=(self.state_dim,))
+
         # Build SAC
         self.actor = GaussianActor(
             self.state_dim,
@@ -137,7 +141,8 @@ class SACBaselineTrainer:
                 },
             )
 
-        obs, _ = self.env.reset(seed=self.seed)
+        raw_obs, _ = self.env.reset(seed=self.seed)
+        obs = self.obs_normalizer.update_and_normalize(raw_obs)
         episode_reward = 0.0
         episode_count = 0
         episode_rewards: list[float] = []
@@ -157,8 +162,9 @@ class SACBaselineTrainer:
                 action = action.cpu().numpy().squeeze(0)
 
             # Step environment
-            next_obs, reward, terminated, truncated, _info = self.env.step(action)
+            raw_next_obs, reward, terminated, truncated, _info = self.env.step(action)
             done = terminated or truncated
+            next_obs = self.obs_normalizer.update_and_normalize(raw_next_obs)
 
             self.buffer.add(obs, action, float(reward), next_obs, done)
             episode_reward += float(reward)
@@ -179,7 +185,8 @@ class SACBaselineTrainer:
                         step=step,
                     )
                 episode_reward = 0.0
-                obs, _ = self.env.reset()
+                raw_obs, _ = self.env.reset()
+                obs = self.obs_normalizer.normalize(raw_obs)
 
             # Train SAC
             if step >= self.learning_starts and len(self.buffer) >= self.batch_size:

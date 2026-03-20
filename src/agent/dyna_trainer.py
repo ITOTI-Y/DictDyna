@@ -70,7 +70,6 @@ class DynaSACTrainer:
         dict_data = torch.load(dict_path, weights_only=False)
         dictionary = dict_data["dictionary"]
 
-        # Override config state_dim based on actual env
         logger.info(
             f"Env: {env_name}, state_dim={state_dim}, action_dim={action_dim}, "
             f"dict={dictionary.shape}"
