@@ -73,6 +73,7 @@ class TestDynaSAC:
                 adapter_dim=32,
             ),
             dyna=DynaSchema(
+                rollout_start_step=0,
                 rollout_horizon=2,
                 rollouts_per_step=5,
                 model_to_real_ratio=0.5,

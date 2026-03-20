@@ -44,6 +44,9 @@ class DynaSchema(BaseModel):
     model_to_real_ratio: float = Field(
         0.5, ge=0, le=1, description="Fraction of simulated data in batch"
     )
+    rollout_start_step: int = Field(
+        5000, ge=0, description="Start model rollouts after this many real steps"
+    )
     model_update_freq: int = Field(
         1, ge=1, description="Update world model every N real steps"
     )

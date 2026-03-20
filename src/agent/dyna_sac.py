@@ -180,7 +180,7 @@ class DynaSAC:
         if self.buffer.real_size < self.config.batch_size:
             return metrics
 
-        # 2. Update world model
+        # 2. Update world model (always, using real data only)
         if global_step % self.config.dyna.model_update_freq == 0:
             batch = self.buffer.real_buffer.sample(self.config.batch_size, self.device)
             wm_metrics = self.wm_trainer.train_step(
@@ -191,25 +191,28 @@ class DynaSAC:
             )
             metrics.update({f"wm/{k}": v for k, v in wm_metrics.items()})
 
-        # 3. Model rollouts
-        n_rollouts = self.config.dyna.rollouts_per_step
-        horizon = self.config.dyna.rollout_horizon
-        start_batch = self.buffer.real_buffer.sample(n_rollouts, self.device)
-        start_states = start_batch["states"].cpu().numpy()
+        # 3. Model rollouts (only after warmup period)
+        use_model = global_step >= self.config.dyna.rollout_start_step
+        if use_model:
+            n_rollouts = self.config.dyna.rollouts_per_step
+            horizon = self.config.dyna.rollout_horizon
+            start_batch = self.buffer.real_buffer.sample(n_rollouts, self.device)
+            start_states = start_batch["states"].cpu().numpy()
 
-        rollout_data = self.rollout_gen.generate(start_states, bid_idx, horizon)
-        self.buffer.add_model_batch(
-            rollout_data["states"],
-            rollout_data["actions"],
-            rollout_data["rewards"],
-            rollout_data["next_states"],
-            rollout_data["dones"],
-        )
+            rollout_data = self.rollout_gen.generate(start_states, bid_idx, horizon)
+            self.buffer.add_model_batch(
+                rollout_data["states"],
+                rollout_data["actions"],
+                rollout_data["rewards"],
+                rollout_data["next_states"],
+                rollout_data["dones"],
+            )
 
-        # 4. SAC update on mixed batch
+        # 4. SAC update (pure real data during warmup, mixed after)
+        model_ratio = self.config.dyna.model_to_real_ratio if use_model else 0.0
         mixed_batch = self.buffer.sample(
             self.config.batch_size,
-            model_ratio=self.config.dyna.model_to_real_ratio,
+            model_ratio=model_ratio,
             device=self.device,
         )
         sac_metrics = self.sac_trainer.update(
