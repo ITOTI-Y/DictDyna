@@ -80,7 +80,8 @@ class DynaSACTrainer:
             f"dict={dictionary.shape}"
         )
 
-        # Build Dyna-SAC (raw obs space, no normalization)
+        # Build Dyna-SAC: buffer/world model in raw space,
+        # actor/critic have internal obs normalization layer
         self.dyna = DynaSAC(
             state_dim=state_dim,
             action_dim=action_dim,
@@ -89,6 +90,8 @@ class DynaSACTrainer:
             config=config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
+            obs_mean=dict_data.get("obs_mean"),
+            obs_std=dict_data.get("obs_std"),
         )
 
     def train(self) -> dict:

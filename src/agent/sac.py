@@ -7,6 +7,31 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 
+class ObsNormLayer(nn.Module):
+    """Fixed observation normalization layer (non-learnable).
+
+    Normalizes input: (x - mean) / std, clamped to [-clip, clip].
+    """
+
+    def __init__(
+        self,
+        obs_mean: np.ndarray | torch.Tensor,
+        obs_std: np.ndarray | torch.Tensor,
+        clip: float = 10.0,
+    ) -> None:
+        super().__init__()
+        self.register_buffer("mean", torch.as_tensor(obs_mean, dtype=torch.float32))
+        self.register_buffer("std", torch.as_tensor(obs_std, dtype=torch.float32))
+        self.clip = clip
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(
+            (x - self.mean) / self.std,
+            -self.clip,
+            self.clip,  # ty: ignore[unsupported-operator]
+        )
+
+
 class SoftQNetwork(nn.Module):
     """Twin Q-networks for SAC.
 
@@ -14,6 +39,8 @@ class SoftQNetwork(nn.Module):
         state_dim: Observation dimension.
         action_dim: Action dimension.
         hidden_dims: Hidden layer sizes.
+        obs_mean: If provided, normalize state inputs.
+        obs_std: If provided, normalize state inputs.
     """
 
     def __init__(
@@ -21,9 +48,18 @@ class SoftQNetwork(nn.Module):
         state_dim: int,
         action_dim: int,
         hidden_dims: list[int] | None = None,
+        obs_mean: np.ndarray | None = None,
+        obs_std: np.ndarray | None = None,
     ) -> None:
         super().__init__()
         hidden_dims = hidden_dims or [256, 256]
+
+        self.obs_norm = (
+            ObsNormLayer(obs_mean, obs_std)
+            if obs_mean is not None and obs_std is not None
+            else None
+        )
+
         # Q1
         q1_layers: list[nn.Module] = []
         in_dim = state_dim + action_dim
@@ -45,6 +81,8 @@ class SoftQNetwork(nn.Module):
     def forward(
         self, state: torch.Tensor, action: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.obs_norm is not None:
+            state = self.obs_norm(state)
         x = torch.cat([state, action], dim=-1)
         return self.q1(x), self.q2(x)
 
@@ -56,8 +94,10 @@ class GaussianActor(nn.Module):
         state_dim: Observation dimension.
         action_dim: Action dimension.
         hidden_dims: Hidden layer sizes.
-        action_scale: Scale for tanh squashing.
-        action_bias: Bias for tanh squashing.
+        action_scale: Scale for tanh squashing (scalar or per-dim).
+        action_bias: Bias for tanh squashing (scalar or per-dim).
+        obs_mean: If provided, normalize state inputs.
+        obs_std: If provided, normalize state inputs.
     """
 
     LOG_STD_MIN = -5.0
@@ -70,9 +110,18 @@ class GaussianActor(nn.Module):
         hidden_dims: list[int] | None = None,
         action_scale: float | np.ndarray = 1.0,
         action_bias: float | np.ndarray = 0.0,
+        obs_mean: np.ndarray | None = None,
+        obs_std: np.ndarray | None = None,
     ) -> None:
         super().__init__()
         hidden_dims = hidden_dims or [256, 256]
+
+        self.obs_norm = (
+            ObsNormLayer(obs_mean, obs_std)
+            if obs_mean is not None and obs_std is not None
+            else None
+        )
+
         layers: list[nn.Module] = []
         in_dim = state_dim
         for h in hidden_dims:
@@ -81,7 +130,7 @@ class GaussianActor(nn.Module):
         self.trunk = nn.Sequential(*layers)
         self.mean_head = nn.Linear(in_dim, action_dim)
         self.log_std_head = nn.Linear(in_dim, action_dim)
-        # Support per-dimension scale/bias (numpy array or scalar)
+        # Support per-dimension scale/bias
         self.register_buffer(
             "action_scale",
             torch.as_tensor(action_scale, dtype=torch.float32),
@@ -92,11 +141,9 @@ class GaussianActor(nn.Module):
         )
 
     def forward(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample action and compute log probability.
-
-        Returns:
-            (action, log_prob) where action is squashed.
-        """
+        """Sample action and compute log probability."""
+        if self.obs_norm is not None:
+            state = self.obs_norm(state)
         h = self.trunk(state)
         mean = self.mean_head(h)
         log_std = self.log_std_head(h).clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
@@ -115,6 +162,8 @@ class GaussianActor(nn.Module):
 
     def get_action(self, state: torch.Tensor) -> torch.Tensor:
         """Get deterministic action (mean) for evaluation."""
+        if self.obs_norm is not None:
+            state = self.obs_norm(state)
         h = self.trunk(state)
         mean = self.mean_head(h)
         return torch.tanh(mean) * self.action_scale + self.action_bias  # ty: ignore[unsupported-operator]
@@ -189,11 +238,7 @@ class SACTrainer:
         next_states: torch.Tensor,
         dones: torch.Tensor,
     ) -> dict[str, float]:
-        """Single SAC update step.
-
-        Returns:
-            Dict of training metrics.
-        """
+        """Single SAC update step."""
         # --- Critic update ---
         with torch.no_grad():
             next_actions, next_log_probs = self.actor(next_states)

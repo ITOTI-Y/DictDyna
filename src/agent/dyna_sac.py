@@ -45,8 +45,6 @@ class DynaSAC:
         action_bias: float | np.ndarray = 0.0,
         obs_mean: torch.Tensor | None = None,
         obs_std: torch.Tensor | None = None,
-        diff_mean: torch.Tensor | None = None,
-        diff_std: torch.Tensor | None = None,
     ) -> None:
         self.config = config
         self.device = get_device(config.device)
@@ -67,41 +65,45 @@ class DynaSAC:
             topk_k=config.encoder.topk_k,
         ).to(self.device)
 
-        # Build world model (with space conversion if stats provided)
+        # Build world model (raw obs space, no space conversion)
         self.world_model = DictDynamicsModel(
             dictionary=dictionary.to(self.device),
             sparse_encoder=self.encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
-            diff_mean=diff_mean,
-            diff_std=diff_std,
-            obs_std=obs_std,
         ).to(self.device)
 
-        # Build reward estimator (denormalizes predicted states for reward calc)
-        self.reward_estimator = SinergymRewardEstimator(
-            obs_mean=obs_mean,
-            obs_std=obs_std,
-        )
+        # Build reward estimator (works on raw states, no denorm needed)
+        self.reward_estimator = SinergymRewardEstimator()
 
-        # Build SAC components
+        # Convert obs stats to numpy for actor/critic normalization layer
+        obs_mean_np = obs_mean.numpy() if obs_mean is not None else None
+        obs_std_np = obs_std.numpy() if obs_std is not None else None
+
+        # Build SAC components (with internal obs normalization)
         self.actor = GaussianActor(
             state_dim,
             action_dim,
             hidden_dims=config.sac.hidden_dims,
             action_scale=action_scale,
             action_bias=action_bias,
+            obs_mean=obs_mean_np,
+            obs_std=obs_std_np,
         ).to(self.device)
 
         self.critic = SoftQNetwork(
             state_dim,
             action_dim,
             hidden_dims=config.sac.hidden_dims,
+            obs_mean=obs_mean_np,
+            obs_std=obs_std_np,
         ).to(self.device)
 
         self.critic_target = SoftQNetwork(
             state_dim,
             action_dim,
             hidden_dims=config.sac.hidden_dims,
+            obs_mean=obs_mean_np,
+            obs_std=obs_std_np,
         ).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
