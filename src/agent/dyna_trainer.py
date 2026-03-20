@@ -82,7 +82,7 @@ class DynaSACTrainer:
             f"dict={dictionary.shape}"
         )
 
-        # Build Dyna-SAC (pass obs stats for reward estimator denormalization)
+        # Build Dyna-SAC with space conversion stats
         self.dyna = DynaSAC(
             state_dim=state_dim,
             action_dim=action_dim,
@@ -93,6 +93,8 @@ class DynaSACTrainer:
             action_bias=self.action_bias,
             obs_mean=dict_data["obs_mean"],
             obs_std=dict_data["obs_std"],
+            diff_mean=dict_data["diff_mean"],
+            diff_std=dict_data["diff_std"],
         )
 
     def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:

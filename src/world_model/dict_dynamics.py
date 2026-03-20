@@ -1,4 +1,9 @@
-"""Dictionary dynamics model: s' = s + D @ alpha."""
+"""Dictionary dynamics model with space conversion.
+
+When policy operates in obs-normalized space and dictionary in diff-normalized space:
+  D*alpha is in diff-norm space -> convert to obs-norm: delta_obs = D*alpha * diff_std / obs_std
+  s'_norm = s_norm + delta_obs + diff_mean / obs_std
+"""
 
 import torch
 import torch.nn as nn
@@ -7,16 +12,19 @@ from src.world_model.sparse_encoder import SparseEncoder
 
 
 class DictDynamicsModel(nn.Module):
-    """Dictionary-based transition dynamics model.
+    """Dictionary-based transition dynamics model with space conversion.
 
-    Core equation: s_{t+1} = s_t + D @ g_theta(s_t, a_t; phi_i)
-
-    Where D is a (d, K) dictionary matrix and g_theta is the sparse encoder.
+    Supports two modes:
+    1. Raw mode (no conversion): s' = s + D @ alpha
+    2. Normalized mode: policy in obs-norm, dict in diff-norm, with conversion
 
     Args:
         dictionary: Initial dictionary tensor, shape (d, K).
         sparse_encoder: SparseEncoder instance.
         learnable_dict: Whether D is a learnable parameter.
+        diff_mean: Mean of state diffs (for space conversion).
+        diff_std: Std of state diffs (for space conversion).
+        obs_std: Std of observations (for space conversion).
     """
 
     def __init__(
@@ -24,6 +32,9 @@ class DictDynamicsModel(nn.Module):
         dictionary: torch.Tensor,
         sparse_encoder: SparseEncoder,
         learnable_dict: bool = True,
+        diff_mean: torch.Tensor | None = None,
+        diff_std: torch.Tensor | None = None,
+        obs_std: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.encoder = sparse_encoder
@@ -33,13 +44,27 @@ class DictDynamicsModel(nn.Module):
         else:
             self.register_buffer("dictionary", dictionary.clone())
 
+        # Space conversion buffers (None = raw mode, no conversion)
+        self._has_conversion = diff_std is not None and obs_std is not None
+        if self._has_conversion:
+            # scale converts diff-norm space to obs-norm space: diff_std / obs_std
+            scale = diff_std / obs_std  # ty: ignore[unsupported-operator]
+            self.register_buffer("_scale", scale)
+            # bias accounts for diff_mean in obs-norm space: diff_mean / obs_std
+            bias = (
+                diff_mean / obs_std
+                if diff_mean is not None
+                else torch.zeros_like(scale)
+            )  # ty: ignore[unsupported-operator]
+            self.register_buffer("_bias", bias)
+
     @property
     def n_atoms(self) -> int:
-        return self.dictionary.shape[1]
+        return self.dictionary.shape[1]  # ty: ignore[not-subscriptable]
 
     @property
     def state_dim(self) -> int:
-        return self.dictionary.shape[0]
+        return self.dictionary.shape[0]  # ty: ignore[not-subscriptable]
 
     def forward(
         self,
@@ -49,18 +74,26 @@ class DictDynamicsModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict next state.
 
+        If space conversion is enabled:
+          delta_diff_norm = D @ alpha          (in diff-norm space)
+          delta_obs_norm = delta * scale + bias (convert to obs-norm space)
+          s'_obs_norm = s_obs_norm + delta_obs_norm
+
         Args:
-            state: Current states, shape (batch, d).
-            action: Actions, shape (batch, m).
+            state: Current states (obs-normalized if conversion enabled).
+            action: Actions (always in raw action space).
             building_id: Building identifier.
 
         Returns:
-            (predicted_next_state, alpha) where:
-              - predicted_next_state: shape (batch, d)
-              - alpha: sparse codes, shape (batch, K)
+            (predicted_next_state, alpha)
         """
         alpha = self.encoder(state, action, building_id)
-        delta = alpha @ self.dictionary.T  # (batch, d)
+        delta = alpha @ self.dictionary.T  # ty: ignore[unsupported-operator]
+
+        if self._has_conversion:
+            # Convert from diff-norm to obs-norm space
+            delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
+
         next_state = state + delta
         return next_state, alpha
 
@@ -79,7 +112,7 @@ class DictDynamicsModel(nn.Module):
         with torch.no_grad():
             norms = torch.norm(self.dictionary, dim=0, keepdim=True)
             norms = torch.clamp(norms, min=1e-10)
-            self.dictionary.div_(norms)
+            self.dictionary.div_(norms)  # ty: ignore[unresolved-attribute]
 
     def compute_loss(
         self,
@@ -89,20 +122,7 @@ class DictDynamicsModel(nn.Module):
         building_id: str = "0",
         sparsity_lambda: float = 0.1,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute world model loss.
-
-        Loss = MSE(s', s_hat') + lambda * ||alpha||_1
-
-        Args:
-            state: Current states, shape (batch, d).
-            action: Actions, shape (batch, m).
-            next_state: True next states, shape (batch, d).
-            building_id: Building identifier.
-            sparsity_lambda: L1 sparsity weight.
-
-        Returns:
-            (total_loss, metrics_dict)
-        """
+        """Compute world model loss: MSE + lambda * L1."""
         pred_next, alpha = self.forward(state, action, building_id)
 
         mse_loss = torch.mean((next_state - pred_next) ** 2)

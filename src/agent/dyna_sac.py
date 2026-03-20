@@ -45,6 +45,8 @@ class DynaSAC:
         action_bias: float | np.ndarray = 0.0,
         obs_mean: torch.Tensor | None = None,
         obs_std: torch.Tensor | None = None,
+        diff_mean: torch.Tensor | None = None,
+        diff_std: torch.Tensor | None = None,
     ) -> None:
         self.config = config
         self.device = get_device(config.device)
@@ -65,11 +67,14 @@ class DynaSAC:
             topk_k=config.encoder.topk_k,
         ).to(self.device)
 
-        # Build world model
+        # Build world model (with space conversion if stats provided)
         self.world_model = DictDynamicsModel(
             dictionary=dictionary.to(self.device),
             sparse_encoder=self.encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
+            diff_mean=diff_mean,
+            diff_std=diff_std,
+            obs_std=obs_std,
         ).to(self.device)
 
         # Build reward estimator (denormalizes predicted states for reward calc)

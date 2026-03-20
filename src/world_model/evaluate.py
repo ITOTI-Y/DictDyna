@@ -48,8 +48,8 @@ def train_world_model(
     # Load dictionary
     dict_data = torch.load(dict_path, weights_only=False)
     dictionary = dict_data["dictionary"].to(dev)
-    norm_mean = dict_data["mean"].numpy()
-    norm_std = dict_data["std"].numpy()
+    norm_mean = dict_data["obs_mean"].numpy()
+    norm_std = dict_data["obs_std"].numpy()
     n_atoms = dictionary.shape[1]
     state_dim = dictionary.shape[0]
 
