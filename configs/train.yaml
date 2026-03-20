@@ -1,0 +1,18 @@
+defaults:
+  - base
+
+pretrained_dict_path: output/pretrained/dict_k128.pt
+
+env:
+  platform: sinergym
+  buildings:
+    - env_name: Eplus-5zone-hot-continuous-v1
+      building_id: office_hot
+    - env_name: Eplus-5zone-mixed-continuous-v1
+      building_id: office_mixed
+    - env_name: Eplus-5zone-cool-continuous-v1
+      building_id: office_cool
+
+output:
+  checkpoint_dir: output/checkpoints/
+  results_dir: output/results/

@@ -1,0 +1,19 @@
+defaults:
+  - base
+
+transfer:
+  adaptation_days: 7
+  freeze_dictionary: true
+  freeze_shared_encoder: true
+  adapter_lr: 1e-3
+  adaptation_epochs: 50
+
+source:
+  checkpoint_path: output/checkpoints/best.pt
+
+target:
+  env_name: Eplus-5zone-cool-continuous-v1
+  building_id: office_cool_transfer
+
+output:
+  results_dir: output/results/transfer/

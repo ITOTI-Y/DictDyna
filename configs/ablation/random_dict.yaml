@@ -1,0 +1,6 @@
+defaults:
+  - ../base
+
+# Ablation: random dictionary (no pretraining)
+dictionary:
+  pretrain_epochs: 0

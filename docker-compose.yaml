@@ -1,0 +1,13 @@
+services:
+  sinergym:
+    image: sailugr/sinergym:latest
+    volumes:
+      - .:/workspace
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+    working_dir: /workspace
+    environment:
+      - PYTHONPATH=/workspace
+    command: ["bash"]
+    stdin_open: true
+    tty: true

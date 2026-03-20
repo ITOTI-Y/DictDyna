@@ -1,0 +1,57 @@
+[project]
+name = "dictdyna"
+version = "0.1.0"
+description = "Dictionary Learning based Shared World Model for Transferable MBRL in Building Energy Management"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.26",
+    "gymnasium>=1.0",
+    "pandas>=2.2",
+    "scikit-learn>=1.5",
+    "omegaconf>=2.3",
+    "pydantic>=2.9",
+    "loguru>=0.7",
+    "typer>=0.12",
+    "wandb>=0.18",
+    "ultraplot>=0.3",
+]
+
+[project.optional-dependencies]
+sinergym = ["sinergym>=3.11"]
+# citylearn has scikit-learn<=1.2.2 constraint conflict; install manually:
+#   uv pip install citylearn
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "ty>=0.0.1a0",
+    "pytest>=8.0",
+]
+
+[tool.uv]
+package = true
+
+[project.scripts]
+dictdyna = "cli:app"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM", "RUF", "N"]
+ignore = ["E501", "N805", "N806", "N812"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.ty]
+
+[tool.ty.rules]
+unresolved-import = "ignore"

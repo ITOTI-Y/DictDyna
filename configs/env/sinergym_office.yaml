@@ -1,0 +1,16 @@
+platform: sinergym
+
+buildings:
+  - env_name: Eplus-5zone-hot-continuous-v1
+    building_id: office_hot
+
+state_variables:
+  - outdoor_temperature
+  - outdoor_humidity
+  - direct_solar_radiation
+  - diffuse_solar_radiation
+  - indoor_temperature
+  - hvac_power
+  - month
+  - day_of_month
+  - hour

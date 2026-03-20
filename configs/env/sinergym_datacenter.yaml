@@ -1,0 +1,5 @@
+platform: sinergym
+
+buildings:
+  - env_name: Eplus-datacenter_dx-mixed-continuous-stochastic-v1
+    building_id: datacenter_mixed

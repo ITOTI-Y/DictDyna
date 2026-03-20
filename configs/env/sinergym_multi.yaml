@@ -1,0 +1,22 @@
+platform: sinergym
+
+buildings:
+  - env_name: Eplus-5zone-hot-continuous-v1
+    building_id: office_hot
+  - env_name: Eplus-5zone-mixed-continuous-v1
+    building_id: office_mixed
+  - env_name: Eplus-5zone-cool-continuous-v1
+    building_id: office_cool
+  - env_name: Eplus-datacenter_dx-mixed-continuous-stochastic-v1
+    building_id: datacenter_mixed
+
+state_variables:
+  - outdoor_temperature
+  - outdoor_humidity
+  - direct_solar_radiation
+  - diffuse_solar_radiation
+  - indoor_temperature
+  - hvac_power
+  - month
+  - day_of_month
+  - hour

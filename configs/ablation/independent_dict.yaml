@@ -1,0 +1,5 @@
+defaults:
+  - ../base
+
+# Ablation: independent dictionary per building (no sharing)
+independent_dictionary: true

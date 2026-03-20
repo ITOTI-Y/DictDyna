@@ -1,0 +1,14 @@
+platform: citylearn
+
+# Scalability experiment: 5 -> 20 -> 50 buildings
+scale_levels:
+  - n_buildings: 5
+    name: citylearn_5b
+  - n_buildings: 20
+    name: citylearn_20b
+  - n_buildings: 50
+    name: citylearn_50b
+
+# Note: CityLearn dynamics = storage system (battery SOC),
+# NOT thermal dynamics. This tests DictDyna generalization
+# to different dynamics types.

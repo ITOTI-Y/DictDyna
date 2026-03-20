@@ -1,0 +1,40 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data and output (large / generated)
+data/offline_rollouts/
+data/processed/
+output/
+
+# Experiment tracking
+wandb/
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+
+# Sinergym EnergyPlus simulation workdir
+Eplus-*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+_dev/
+
+.claude/

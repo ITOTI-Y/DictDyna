@@ -1,0 +1,15 @@
+platform: sinergym
+
+# Source buildings (trained on)
+source_buildings:
+  - env_name: Eplus-5zone-hot-continuous-v1
+    building_id: office_hot
+  - env_name: Eplus-5zone-mixed-continuous-v1
+    building_id: office_mixed
+
+# Target buildings (transfer to)
+target_buildings:
+  - env_name: Eplus-5zone-cool-continuous-v1
+    building_id: office_cool_transfer
+  - env_name: Eplus-datacenter_dx-mixed-continuous-stochastic-v1
+    building_id: datacenter_transfer

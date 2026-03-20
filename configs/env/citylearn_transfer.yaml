@@ -1,0 +1,9 @@
+platform: citylearn
+
+source_n_buildings: 5
+target_n_buildings: 10
+
+transfer:
+  adaptation_days: 7
+  freeze_dictionary: true
+  freeze_shared_encoder: true

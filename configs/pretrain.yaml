@@ -1,0 +1,26 @@
+defaults:
+  - base
+
+dictionary:
+  n_atoms: 128
+  pretrain_epochs: 200
+  pretrain_lr: 1e-3
+
+data:
+  source: sinergym_rollout
+  collection_policy: rbc
+  n_episodes_per_building: 2
+  buildings:
+    - env_name: Eplus-5zone-hot-continuous-v1
+      building_id: office_hot
+    - env_name: Eplus-5zone-mixed-continuous-v1
+      building_id: office_mixed
+    - env_name: Eplus-5zone-cool-continuous-v1
+      building_id: office_cool
+    - env_name: Eplus-datacenter_dx-mixed-continuous-stochastic-v1
+      building_id: datacenter_mixed
+  normalize: true
+  output_path: data/processed/state_diffs/
+
+output:
+  dict_path: output/pretrained/dict_k128.pt

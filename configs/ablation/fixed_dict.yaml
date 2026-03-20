@@ -1,0 +1,6 @@
+defaults:
+  - ../base
+
+# Ablation: fixed dictionary (no fine-tuning during RL)
+dictionary:
+  slow_update_lr: 0.0
