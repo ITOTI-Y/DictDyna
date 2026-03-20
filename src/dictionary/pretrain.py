@@ -65,16 +65,17 @@ def pretrain_dictionary(
     state_dim = raw_diffs.shape[1]
     logger.info(f"Total data: {raw_diffs.shape}")
 
-    # Z-score normalize diffs
-    diff_mean = raw_diffs.mean(axis=0)
-    diff_std = np.maximum(raw_diffs.std(axis=0), 1e-8)
-    diffs_norm = (raw_diffs - diff_mean) / diff_std
-    logger.info(
-        f"Normalized diffs: mean~{diff_mean.mean():.6f}, std~{diff_std.mean():.4f}"
-    )
-
     # Compute obs stats from raw transitions
     obs_mean, obs_std = compute_obs_stats(transitions_dir, state_dim)
+
+    # Normalize diffs into obs-normalized space: Δs / obs_std
+    # This way D*alpha lives in the same space as (s - obs_mean) / obs_std
+    # and s_norm + D*alpha = s'_norm without any space conversion
+    diffs_norm = raw_diffs / obs_std
+    logger.info(
+        f"Normalized diffs (raw/obs_std): mean~{diffs_norm.mean():.6f}, "
+        f"std~{diffs_norm.std():.4f}"
+    )
 
     # Train dictionary
     if method == "ksvd":
@@ -90,14 +91,12 @@ def pretrain_dictionary(
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    # Save all stats needed for space conversion
+    # Save dictionary and obs stats (no space conversion needed)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "dictionary": dict_tensor,
-            "diff_mean": torch.tensor(diff_mean, dtype=torch.float32),
-            "diff_std": torch.tensor(diff_std, dtype=torch.float32),
             "obs_mean": torch.tensor(obs_mean, dtype=torch.float32),
             "obs_std": torch.tensor(obs_std, dtype=torch.float32),
             "n_atoms": n_atoms,

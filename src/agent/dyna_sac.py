@@ -65,45 +65,38 @@ class DynaSAC:
             topk_k=config.encoder.topk_k,
         ).to(self.device)
 
-        # Build world model (raw obs space, no space conversion)
+        # Build world model (normalized obs space, no conversion needed)
         self.world_model = DictDynamicsModel(
             dictionary=dictionary.to(self.device),
             sparse_encoder=self.encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
         ).to(self.device)
 
-        # Build reward estimator (works on raw states, no denorm needed)
-        self.reward_estimator = SinergymRewardEstimator()
+        # Build reward estimator (denormalizes predicted states for reward calc)
+        self.reward_estimator = SinergymRewardEstimator(
+            obs_mean=obs_mean,
+            obs_std=obs_std,
+        )
 
-        # Convert obs stats to numpy for actor/critic normalization layer
-        obs_mean_np = obs_mean.numpy() if obs_mean is not None else None
-        obs_std_np = obs_std.numpy() if obs_std is not None else None
-
-        # Build SAC components (with internal obs normalization)
+        # Build SAC components (no internal ObsNormLayer - inputs already normalized)
         self.actor = GaussianActor(
             state_dim,
             action_dim,
             hidden_dims=config.sac.hidden_dims,
             action_scale=action_scale,
             action_bias=action_bias,
-            obs_mean=obs_mean_np,
-            obs_std=obs_std_np,
         ).to(self.device)
 
         self.critic = SoftQNetwork(
             state_dim,
             action_dim,
             hidden_dims=config.sac.hidden_dims,
-            obs_mean=obs_mean_np,
-            obs_std=obs_std_np,
         ).to(self.device)
 
         self.critic_target = SoftQNetwork(
             state_dim,
             action_dim,
             hidden_dims=config.sac.hidden_dims,
-            obs_mean=obs_mean_np,
-            obs_std=obs_std_np,
         ).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 

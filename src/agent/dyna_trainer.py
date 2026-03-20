@@ -20,21 +20,14 @@ with contextlib.suppress(ImportError):
 class DynaSACTrainer:
     """Full Dyna-SAC training loop on Sinergym.
 
-    All observations are normalized using fixed stats from dictionary
-    pretraining (obs_mean, obs_std). The world model operates in this
-    same normalized space, ensuring s_norm + D*alpha is correct.
+    Everything operates in obs-normalized space:
+    - Trainer normalizes env obs before storing in buffer
+    - World model: s_norm + D*alpha = s'_norm (D trained on Δs/obs_std)
+    - Actor/critic: receive normalized obs directly (no internal norm layer)
+    - Reward estimator: denormalizes predicted state to compute reward
 
-    Rewards are computed by the environment on raw actions, so they
-    don't need normalization adjustment.
-
-    Args:
-        env_name: Sinergym environment name.
-        building_id: Building identifier.
-        dict_path: Path to pretrained dictionary .pt file.
-        config: TrainSchema configuration.
-        seed: Random seed.
-        save_dir: Directory for checkpoints and results.
-        wandb_project: W&B project name (None to disable).
+    Real env rewards (from env.step) are used directly for real transitions.
+    Estimated rewards (from world model) are computed via denormalization.
     """
 
     def __init__(
@@ -71,17 +64,20 @@ class DynaSACTrainer:
         self.action_scale = (action_high - action_low) / 2.0
         self.action_bias = (action_high + action_low) / 2.0
 
-        # Load pretrained dictionary
+        # Load pretrained dictionary and obs normalization stats
         dict_data = torch.load(dict_path, weights_only=False)
         dictionary = dict_data["dictionary"]
+        self._obs_mean = dict_data["obs_mean"].numpy()
+        self._obs_std = dict_data["obs_std"].numpy()
 
         logger.info(
             f"Env: {env_name}, state_dim={state_dim}, action_dim={action_dim}, "
             f"dict={dictionary.shape}"
         )
 
-        # Build Dyna-SAC: buffer/world model in raw space,
-        # actor/critic have internal obs normalization layer
+        # Build Dyna-SAC: everything in normalized obs space
+        # Actor/critic have NO internal ObsNormLayer (inputs already normalized)
+        # Reward estimator denormalizes to compute reward from predicted states
         self.dyna = DynaSAC(
             state_dim=state_dim,
             action_dim=action_dim,
@@ -90,16 +86,18 @@ class DynaSACTrainer:
             config=config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
-            obs_mean=dict_data.get("obs_mean"),
-            obs_std=dict_data.get("obs_std"),
+            obs_mean=dict_data["obs_mean"],  # for reward estimator denorm
+            obs_std=dict_data["obs_std"],  # for reward estimator denorm
+        )
+
+    def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:
+        """Normalize observation: (s - obs_mean) / obs_std."""
+        return np.clip((raw_obs - self._obs_mean) / self._obs_std, -10.0, 10.0).astype(
+            np.float32
         )
 
     def train(self) -> dict:
-        """Run full Dyna-SAC training loop.
-
-        Returns:
-            Training results dict.
-        """
+        """Run full Dyna-SAC training loop."""
         run = None
         if self.wandb_project:
             import wandb
@@ -115,7 +113,8 @@ class DynaSACTrainer:
         log_interval = self.config.log_interval
         learning_starts = min(1000, self.config.batch_size * 2)
 
-        obs, _ = self.env.reset(seed=self.seed)
+        raw_obs, _ = self.env.reset(seed=self.seed)
+        obs = self._normalize_obs(raw_obs)
         episode_reward = 0.0
         episode_count = 0
         episode_rewards: list[float] = []
@@ -128,17 +127,18 @@ class DynaSACTrainer:
         )
 
         for step in range(1, total_steps + 1):
-            # Select action (actor outputs raw action space values)
+            # Select action (actor takes normalized obs, outputs raw action)
             if step < learning_starts:
                 action = self.env.action_space.sample()
             else:
                 action = self.dyna.select_action(obs)
 
-            # Step environment (env takes raw action, returns raw obs)
-            next_obs, reward, terminated, truncated, _info = self.env.step(action)
+            # Step environment (raw action → raw obs)
+            raw_next_obs, reward, terminated, truncated, _info = self.env.step(action)
             done = terminated or truncated
+            next_obs = self._normalize_obs(raw_next_obs)
 
-            # Dyna-SAC train step (all in normalized obs space)
+            # Dyna-SAC train step (normalized obs in buffer)
             metrics = {}
             if step >= learning_starts:
                 metrics = self.dyna.train_step(
@@ -167,13 +167,12 @@ class DynaSACTrainer:
                 if run:
                     run.log({"episode_reward": episode_reward}, step=step)
                 episode_reward = 0.0
-                obs, _ = self.env.reset()
+                raw_obs, _ = self.env.reset()
+                obs = self._normalize_obs(raw_obs)
 
-            # Log metrics
             if step % log_interval == 0 and metrics and run:
                 run.log(metrics, step=step)
 
-            # Evaluate
             if step % eval_freq == 0:
                 eval_result = self._evaluate()
                 eval_history.append({"step": step, **eval_result})
@@ -189,7 +188,6 @@ class DynaSACTrainer:
                     )
                 self.dyna.save(self.save_dir / f"checkpoint_step{step}.pt")
 
-        # Save final results
         self._save_results(episode_rewards, eval_history)
         self.env.close()
         if run:
@@ -202,16 +200,13 @@ class DynaSACTrainer:
         return {"episode_rewards": episode_rewards, "eval_history": eval_history}
 
     def _evaluate(self) -> dict:
-        """Evaluate using the most recent training episode reward."""
         if self._recent_episode_rewards:
-            recent = self._recent_episode_rewards[-1]
-            return {"mean_reward": recent, "std_reward": 0.0}
+            return {"mean_reward": self._recent_episode_rewards[-1], "std_reward": 0.0}
         return {"mean_reward": 0.0, "std_reward": 0.0}
 
     def _save_results(
         self, episode_rewards: list[float], eval_history: list[dict]
     ) -> None:
-        """Save training results."""
         self.dyna.save(self.save_dir / "final_checkpoint.pt")
         np.save(self.save_dir / "episode_rewards.npy", np.array(episode_rewards))
         with open(self.save_dir / "eval_history.json", "w") as f:
