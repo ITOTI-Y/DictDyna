@@ -43,6 +43,8 @@ class DynaSAC:
         config: TrainSchema,
         action_scale: float | np.ndarray = 1.0,
         action_bias: float | np.ndarray = 0.0,
+        obs_mean: torch.Tensor | None = None,
+        obs_std: torch.Tensor | None = None,
     ) -> None:
         self.config = config
         self.device = get_device(config.device)
@@ -70,11 +72,13 @@ class DynaSAC:
             learnable_dict=config.dictionary.slow_update_lr > 0,
         ).to(self.device)
 
-        # Build reward estimator
+        # Build reward estimator (denormalizes predicted states for reward calc)
         self.reward_estimator = SinergymRewardEstimator(
             comfort_weight=config.reward.comfort_weight,
             temp_target=config.reward.temp_target,
             temp_band=config.reward.temp_band,
+            obs_mean=obs_mean,
+            obs_std=obs_std,
         )
 
         # Build SAC components

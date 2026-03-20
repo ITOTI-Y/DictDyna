@@ -20,7 +20,12 @@ with contextlib.suppress(ImportError):
 class DynaSACTrainer:
     """Full Dyna-SAC training loop on Sinergym.
 
-    Manages environment lifecycle, training, evaluation, and checkpointing.
+    All observations are normalized using fixed stats from dictionary
+    pretraining (obs_mean, obs_std). The world model operates in this
+    same normalized space, ensuring s_norm + D*alpha is correct.
+
+    Rewards are computed by the environment on raw actions, so they
+    don't need normalization adjustment.
 
     Args:
         env_name: Sinergym environment name.
@@ -66,16 +71,18 @@ class DynaSACTrainer:
         self.action_scale = (action_high - action_low) / 2.0
         self.action_bias = (action_high + action_low) / 2.0
 
-        # Load pretrained dictionary
+        # Load pretrained dictionary and obs normalization stats
         dict_data = torch.load(dict_path, weights_only=False)
         dictionary = dict_data["dictionary"]
+        self._obs_mean = dict_data["obs_mean"].numpy()
+        self._obs_std = dict_data["obs_std"].numpy()
 
         logger.info(
             f"Env: {env_name}, state_dim={state_dim}, action_dim={action_dim}, "
             f"dict={dictionary.shape}"
         )
 
-        # Build Dyna-SAC
+        # Build Dyna-SAC (pass obs stats for reward estimator denormalization)
         self.dyna = DynaSAC(
             state_dim=state_dim,
             action_dim=action_dim,
@@ -84,6 +91,14 @@ class DynaSACTrainer:
             config=config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
+            obs_mean=dict_data["obs_mean"],
+            obs_std=dict_data["obs_std"],
+        )
+
+    def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:
+        """Normalize observation: (s - obs_mean) / obs_std, clipped."""
+        return np.clip((raw_obs - self._obs_mean) / self._obs_std, -10.0, 10.0).astype(
+            np.float32
         )
 
     def train(self) -> dict:
@@ -107,7 +122,8 @@ class DynaSACTrainer:
         log_interval = self.config.log_interval
         learning_starts = min(1000, self.config.batch_size * 2)
 
-        obs, _ = self.env.reset(seed=self.seed)
+        raw_obs, _ = self.env.reset(seed=self.seed)
+        obs = self._normalize_obs(raw_obs)
         episode_reward = 0.0
         episode_count = 0
         episode_rewards: list[float] = []
@@ -120,17 +136,18 @@ class DynaSACTrainer:
         )
 
         for step in range(1, total_steps + 1):
-            # Select action
+            # Select action (actor outputs raw action space values)
             if step < learning_starts:
                 action = self.env.action_space.sample()
             else:
                 action = self.dyna.select_action(obs)
 
-            # Step environment
-            next_obs, reward, terminated, truncated, _info = self.env.step(action)
+            # Step environment (env takes raw action, returns raw obs)
+            raw_next_obs, reward, terminated, truncated, _info = self.env.step(action)
             done = terminated or truncated
+            next_obs = self._normalize_obs(raw_next_obs)
 
-            # Dyna-SAC train step
+            # Dyna-SAC train step (all in normalized obs space)
             metrics = {}
             if step >= learning_starts:
                 metrics = self.dyna.train_step(
@@ -143,7 +160,6 @@ class DynaSACTrainer:
                     step,
                 )
             else:
-                # Just fill buffer before training starts
                 self.dyna.buffer.add_real(obs, action, float(reward), next_obs, done)
 
             episode_reward += float(reward)
@@ -160,7 +176,8 @@ class DynaSACTrainer:
                 if run:
                     run.log({"episode_reward": episode_reward}, step=step)
                 episode_reward = 0.0
-                obs, _ = self.env.reset()
+                raw_obs, _ = self.env.reset()
+                obs = self._normalize_obs(raw_obs)
 
             # Log metrics
             if step % log_interval == 0 and metrics and run:
@@ -180,7 +197,6 @@ class DynaSACTrainer:
                         {f"eval/{k}": v for k, v in eval_result.items()},
                         step=step,
                     )
-                # Save checkpoint
                 self.dyna.save(self.save_dir / f"checkpoint_step{step}.pt")
 
         # Save final results
@@ -196,11 +212,7 @@ class DynaSACTrainer:
         return {"episode_rewards": episode_rewards, "eval_history": eval_history}
 
     def _evaluate(self) -> dict:
-        """Evaluate using the most recent training episode reward.
-
-        Avoids creating new Sinergym env instances which can cause
-        EnergyPlus SIGSEGV crashes.
-        """
+        """Evaluate using the most recent training episode reward."""
         if self._recent_episode_rewards:
             recent = self._recent_episode_rewards[-1]
             return {"mean_reward": recent, "std_reward": 0.0}
