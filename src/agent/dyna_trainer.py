@@ -166,6 +166,8 @@ class DynaSACTrainer:
                 )
                 if run:
                     run.log({"episode_reward": episode_reward}, step=step)
+                # Clear stale model data (MBPO-style: fresh rollouts each episode)
+                self.dyna.on_episode_end()
                 episode_reward = 0.0
                 raw_obs, _ = self.env.reset()
                 obs = self._normalize_obs(raw_obs)

@@ -37,12 +37,12 @@ class DynaSchema(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    rollout_horizon: int = Field(3, ge=1, le=10, description="H: model rollout steps")
+    rollout_horizon: int = Field(1, ge=1, le=10, description="H: model rollout steps")
     rollouts_per_step: int = Field(
         10, ge=1, description="M: number of rollouts per real step"
     )
     model_to_real_ratio: float = Field(
-        0.5, ge=0, le=1, description="Fraction of simulated data in batch"
+        0.2, ge=0, le=1, description="Fraction of simulated data in batch"
     )
     rollout_start_step: int = Field(
         5000, ge=0, description="Start model rollouts after this many real steps"

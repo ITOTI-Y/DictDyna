@@ -59,17 +59,21 @@ class SinergymRewardEstimator:
         Returns:
             Estimated reward, shape (batch,).
         """
-        # Denormalize if needed
+        # Denormalize if needed, with OOD clipping
         if self.obs_mean is not None and self.obs_std is not None:
-            state_raw = predicted_state * self.obs_std.to(
+            # Clip normalized state to training range before denormalization
+            clipped = torch.clamp(predicted_state, -10.0, 10.0)
+            state_raw = clipped * self.obs_std.to(
                 predicted_state.device
             ) + self.obs_mean.to(predicted_state.device)
         else:
             state_raw = predicted_state
 
-        month = state_raw[:, self.state_indices["month"]]
-        temp = state_raw[:, self.state_indices["indoor_temp"]]
-        power = state_raw[:, self.state_indices["hvac_power"]]
+        month = torch.clamp(state_raw[:, self.state_indices["month"]], 1.0, 12.0)
+        temp = torch.clamp(state_raw[:, self.state_indices["indoor_temp"]], 5.0, 45.0)
+        power = torch.clamp(
+            state_raw[:, self.state_indices["hvac_power"]], 0.0, 20000.0
+        )
 
         # Seasonal comfort range
         is_summer = (month >= self.summer_months[0]) & (month <= self.summer_months[1])

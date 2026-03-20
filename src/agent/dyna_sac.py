@@ -131,10 +131,11 @@ class DynaSAC:
             device=self.device,
         )
 
-        # Build replay buffer
+        # Build replay buffer (small model buffer for freshness, MBPO-style)
+        model_capacity = min(config.buffer_size, 10_000)
         self.buffer = MixedReplayBuffer(
             real_capacity=config.buffer_size,
-            model_capacity=config.buffer_size,
+            model_capacity=model_capacity,
             state_dim=state_dim,
             action_dim=action_dim,
         )
@@ -220,6 +221,10 @@ class DynaSAC:
         metrics.update({f"sac/{k}": v for k, v in sac_metrics.items()})
 
         return metrics
+
+    def on_episode_end(self) -> None:
+        """Clear model buffer at episode boundary (MBPO-style freshness)."""
+        self.buffer.clear_model_buffer()
 
     def select_action(
         self, state: np.ndarray, deterministic: bool = False

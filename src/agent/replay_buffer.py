@@ -117,6 +117,11 @@ class MixedReplayBuffer:
         """Add a model-generated transition."""
         self.model_buffer.add(state, action, reward, next_state, done)
 
+    def clear_model_buffer(self) -> None:
+        """Clear all model-generated transitions (MBPO-style refresh)."""
+        self.model_buffer.pos = 0
+        self.model_buffer.size = 0
+
     def add_model_batch(
         self,
         states: np.ndarray,
