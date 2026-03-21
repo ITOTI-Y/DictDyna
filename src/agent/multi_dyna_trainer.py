@@ -55,22 +55,21 @@ class MultiBuildingDynaSAC:
 
         seed_everything(seed)
 
-        # Create environments
-        self.envs: dict[str, gymnasium.Env] = {}
-        self.building_ids: list[str] = []
-        for cfg in building_configs:
-            bid = cfg["building_id"]
-            with sinergym_workdir():
-                self.envs[bid] = gymnasium.make(cfg["env_name"])
-            self.building_ids.append(bid)
+        # Only create one env at a time (EnergyPlus crashes with multiple instances)
+        self.building_ids = [cfg["building_id"] for cfg in building_configs]
+        self._current_env: gymnasium.Env | None = None
+        self._current_bid: str | None = None
 
-        env0 = next(iter(self.envs.values()))
-        state_dim = env0.observation_space.shape[0]  # ty: ignore[not-subscriptable]
-        action_dim = env0.action_space.shape[0]  # ty: ignore[not-subscriptable]
-        action_low = env0.action_space.low  # ty: ignore[unresolved-attribute]
-        action_high = env0.action_space.high  # ty: ignore[unresolved-attribute]
+        # Probe state/action dims from first env (create and close immediately)
+        with sinergym_workdir():
+            probe_env = gymnasium.make(building_configs[0]["env_name"])
+        state_dim = probe_env.observation_space.shape[0]  # ty: ignore[not-subscriptable]
+        action_dim = probe_env.action_space.shape[0]  # ty: ignore[not-subscriptable]
+        action_low = probe_env.action_space.low  # ty: ignore[unresolved-attribute]
+        action_high = probe_env.action_space.high  # ty: ignore[unresolved-attribute]
         action_scale = (action_high - action_low) / 2.0
         action_bias = (action_high + action_low) / 2.0
+        probe_env.close()
 
         # Load dictionary and normalization stats
         dict_data = torch.load(dict_path, weights_only=False)
@@ -119,127 +118,119 @@ class MultiBuildingDynaSAC:
             self._independent_dicts[bid] = torch.nn.Parameter(d)
         logger.info(f"Independent dict mode: {self.n_buildings} separate dictionaries")
 
+    def _get_env(self, bid_idx: int) -> gymnasium.Env:
+        """Get env for building, creating if needed (single instance only)."""
+        bid = self.building_ids[bid_idx]
+        if self._current_bid != bid:
+            # Close current env
+            if self._current_env is not None:
+                with contextlib.suppress(Exception):
+                    self._current_env.close()
+            # Create new env
+            cfg = self.building_configs[bid_idx]
+            with sinergym_workdir():
+                self._current_env = gymnasium.make(cfg["env_name"])
+            self._current_bid = bid
+            logger.info(f"Switched to building: {bid}")
+        return self._current_env  # ty: ignore[return-value]
+
     def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:
         return np.clip((raw_obs - self._obs_mean) / self._obs_std, -10.0, 10.0).astype(
             np.float32
         )
 
     def train(self) -> dict:
-        """Run multi-building training with round-robin stepping."""
-        total_steps = self.config.total_timesteps
-        eval_freq = self.config.eval_freq
+        """Run multi-building training with sequential episodes.
+
+        Each iteration runs one full episode for one building, then
+        switches to the next. Only one EnergyPlus instance at a time.
+        """
+        n_episodes_per_building = self.config.total_timesteps // (
+            35040 * self.n_buildings
+        )
+        n_episodes_per_building = max(n_episodes_per_building, 1)
         learning_starts = min(1000, self.config.batch_size * 2)
 
-        # Per-building state
-        obs: dict[str, np.ndarray] = {}
-        episode_rewards: dict[str, float] = {}
-        episode_counts: dict[str, int] = {}
-        all_episode_rewards: dict[str, list[float]] = {}
-
-        for bid in self.building_ids:
-            raw_obs, _ = self.envs[bid].reset(seed=self.seed)
-            obs[bid] = self._normalize_obs(raw_obs)
-            episode_rewards[bid] = 0.0
-            episode_counts[bid] = 0
-            all_episode_rewards[bid] = []
-
+        episode_counts: dict[str, int] = dict.fromkeys(self.building_ids, 0)
+        all_episode_rewards: dict[str, list[float]] = {
+            bid: [] for bid in self.building_ids
+        }
         eval_history: list[dict] = []
         global_step = 0
 
         logger.info(
-            f"Starting multi-building training: {total_steps} steps, "
+            f"Sequential multi-building: {n_episodes_per_building} episodes/building, "
             f"{self.n_buildings} buildings"
         )
 
-        while global_step < total_steps:
+        for ep_round in range(n_episodes_per_building):
             for bid_idx, bid in enumerate(self.building_ids):
-                global_step += 1
-                if global_step > total_steps:
-                    break
-
-                # Select action
-                if global_step < learning_starts:
-                    action = self.envs[bid].action_space.sample()  # ty: ignore[unresolved-attribute]
-                else:
-                    action = self.dyna.select_action(obs[bid])
-
-                # Step environment (with crash protection)
-                try:
-                    raw_next, reward, term, trunc, _ = self.envs[bid].step(action)
-                except Exception as e:
-                    logger.warning(f"[{bid}] env.step crashed: {e}, recreating env")
-                    with contextlib.suppress(Exception):
-                        self.envs[bid].close()
-                    cfg = self.building_configs[bid_idx]
-                    with sinergym_workdir():
-                        self.envs[bid] = gymnasium.make(cfg["env_name"])
-                    raw_next, _ = self.envs[bid].reset()
-                    reward, term, trunc = 0.0, False, True
-                done = term or trunc
-                next_obs = self._normalize_obs(raw_next)
-
-                # Store in shared tagged buffer
-                self.real_buffer.add(
-                    obs[bid], action, float(reward), next_obs, done, tag=bid_idx
+                logger.info(
+                    f"Round {ep_round + 1}/{n_episodes_per_building}, Building: {bid}"
                 )
 
-                # Train step
-                if global_step >= learning_starts:
-                    self._train_step(
-                        bid,
-                        bid_idx,
-                        obs[bid],
-                        action,
-                        float(reward),
-                        next_obs,
-                        done,
-                        global_step,
+                # Create env for this building (only one at a time)
+                env = self._get_env(bid_idx)
+                raw_obs, _ = env.reset(seed=self.seed + ep_round)
+                obs = self._normalize_obs(raw_obs)
+                episode_reward = 0.0
+                done = False
+
+                while not done:
+                    global_step += 1
+
+                    # Select action
+                    if global_step < learning_starts:
+                        action = env.action_space.sample()  # ty: ignore[unresolved-attribute]
+                    else:
+                        action = self.dyna.select_action(obs)
+
+                    # Step
+                    raw_next, reward, term, trunc, _ = env.step(action)
+                    done = term or trunc
+                    next_obs = self._normalize_obs(raw_next)
+
+                    # Store in shared tagged buffer
+                    self.real_buffer.add(
+                        obs, action, float(reward), next_obs, done, tag=bid_idx
                     )
 
-                episode_rewards[bid] += float(reward)
-                obs[bid] = next_obs
+                    # Train
+                    if global_step >= learning_starts:
+                        self._train_step(
+                            bid,
+                            bid_idx,
+                            obs,
+                            action,
+                            float(reward),
+                            next_obs,
+                            done,
+                            global_step,
+                        )
 
-                if done:
-                    episode_counts[bid] += 1
-                    all_episode_rewards[bid].append(episode_rewards[bid])
-                    logger.info(
-                        f"[{bid}] Episode {episode_counts[bid]} | "
-                        f"Step {global_step}/{total_steps} | "
-                        f"Reward: {episode_rewards[bid]:.1f}"
-                    )
-                    # Save intermediate results at each episode boundary
-                    self._save_results(all_episode_rewards, eval_history)
-                    # Clear this building's model buffer
-                    self.model_buffers[bid].pos = 0
-                    self.model_buffers[bid].size = 0
-                    self.dyna.exploration.apply_decay()
-                    episode_rewards[bid] = 0.0
-                    # Recreate env to avoid EnergyPlus SIGSEGV on reset
-                    with contextlib.suppress(Exception):
-                        self.envs[bid].close()
-                    cfg = self.building_configs[bid_idx]
-                    with sinergym_workdir():
-                        self.envs[bid] = gymnasium.make(cfg["env_name"])
-                    raw_obs, _ = self.envs[bid].reset()
-                    obs[bid] = self._normalize_obs(raw_obs)
+                    episode_reward += float(reward)
+                    obs = next_obs
 
-                # Evaluate
-                if global_step % eval_freq == 0:
-                    eval_result = {
-                        bid: all_episode_rewards[bid][-1]
-                        if all_episode_rewards[bid]
-                        else 0.0
-                        for bid in self.building_ids
-                    }
-                    eval_result["mean"] = np.mean(list(eval_result.values())).item()
-                    eval_history.append({"step": global_step, **eval_result})
-                    logger.info(f"Eval @ {global_step}: {eval_result}")
+                # Episode finished
+                episode_counts[bid] += 1
+                all_episode_rewards[bid].append(episode_reward)
+                logger.info(
+                    f"[{bid}] Episode {episode_counts[bid]} | "
+                    f"Step {global_step} | Reward: {episode_reward:.1f}"
+                )
 
-        # Save results
-        self._save_results(all_episode_rewards, eval_history)
+                # Clear model buffer for this building
+                self.model_buffers[bid].pos = 0
+                self.model_buffers[bid].size = 0
+                self.dyna.exploration.apply_decay()
 
-        for env in self.envs.values():
-            env.close()
+                # Save intermediate results
+                self._save_results(all_episode_rewards, eval_history)
+
+        # Close current env
+        if self._current_env is not None:
+            with contextlib.suppress(Exception):
+                self._current_env.close()
 
         return {
             "episode_rewards": all_episode_rewards,
