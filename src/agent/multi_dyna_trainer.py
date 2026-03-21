@@ -11,8 +11,11 @@ from loguru import logger
 
 from src.agent.dyna_sac import DynaSAC
 from src.agent.replay_buffer import ReplayBuffer, TaggedReplayBuffer
+from src.agent.rollout import ModelRollout
 from src.schemas import TrainSchema
 from src.utils import get_device, seed_everything, sinergym_workdir
+from src.world_model.dict_dynamics import DictDynamicsModel
+from src.world_model.model_trainer import WorldModelTrainer
 
 with contextlib.suppress(ImportError):
     import sinergym  # noqa: F401
@@ -96,9 +99,12 @@ class MultiBuildingDynaSAC:
             obs_std=dict_data["obs_std"],
         )
 
-        # If independent dict, create separate dictionaries per building
+        # Independent dict mode: per-building world models
+        self._per_building_wm: dict[str, DictDynamicsModel] = {}
+        self._per_building_trainer: dict[str, WorldModelTrainer] = {}
+        self._per_building_rollout: dict[str, ModelRollout] = {}
         if independent_dict:
-            self._setup_independent_dicts(dictionary)
+            self._setup_independent(dictionary, config, dict_data)
 
         # Shared tagged real buffer
         self.real_buffer = TaggedReplayBuffer(config.buffer_size, state_dim, action_dim)
@@ -109,14 +115,59 @@ class MultiBuildingDynaSAC:
         for bid in self.building_ids:
             self.model_buffers[bid] = ReplayBuffer(model_cap, state_dim, action_dim)
 
-    def _setup_independent_dicts(self, base_dict: torch.Tensor) -> None:
-        """Create per-building dictionary copies (ablation mode)."""
-        # Store independent dicts as separate parameters
-        self._independent_dicts = {}
-        for bid in self.building_ids:
-            d = base_dict.clone().to(self.device)
-            self._independent_dicts[bid] = torch.nn.Parameter(d)
-        logger.info(f"Independent dict mode: {self.n_buildings} separate dictionaries")
+    def _setup_independent(
+        self, base_dict: torch.Tensor, config: TrainSchema, dict_data: dict
+    ) -> None:
+        """Create per-building world models with independent dictionaries."""
+        from src.world_model.sparse_encoder import SparseEncoder
+
+        state_dim = base_dict.shape[0]
+        action_dim = self.dyna.action_dim
+
+        for _bid_idx, bid in enumerate(self.building_ids):
+            # Independent encoder (own trunk + adapter)
+            encoder = SparseEncoder(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                n_atoms=config.dictionary.n_atoms,
+                shared_hidden_dims=config.encoder.shared_hidden_dims,
+                adapter_dim=config.encoder.adapter_dim,
+                n_buildings=1,
+                activation=config.encoder.activation,
+                sparsity_method=config.encoder.sparsity_method,
+                topk_k=config.encoder.topk_k,
+            ).to(self.device)
+
+            # Independent dictionary (own copy of D)
+            wm = DictDynamicsModel(
+                dictionary=base_dict.clone().to(self.device),
+                sparse_encoder=encoder,
+                learnable_dict=config.dictionary.slow_update_lr > 0,
+            ).to(self.device)
+
+            trainer = WorldModelTrainer(
+                model=wm,
+                encoder_lr=config.dictionary.pretrain_lr,
+                dict_lr=config.dictionary.slow_update_lr,
+                sparsity_lambda=config.dictionary.sparsity_lambda,
+            )
+
+            rollout = ModelRollout(
+                world_model=wm,
+                actor=self.dyna.actor,  # shared actor
+                reward_estimator=self.dyna.reward_estimator,
+                exploration=self.dyna.exploration,
+                device=self.device,
+            )
+
+            self._per_building_wm[bid] = wm
+            self._per_building_trainer[bid] = trainer
+            self._per_building_rollout[bid] = rollout
+
+        logger.info(
+            f"Independent mode: {self.n_buildings} separate world models "
+            f"(shared actor/critic)"
+        )
 
     def _get_env(self, bid_idx: int) -> gymnasium.Env:
         """Get env for building, creating if needed (single instance only)."""
@@ -256,6 +307,16 @@ class MultiBuildingDynaSAC:
         if self.real_buffer.tag_count(bid_idx) < batch_size:
             return
 
+        # Select world model components (shared or independent)
+        if self.independent_dict and bid in self._per_building_wm:
+            wm_trainer = self._per_building_trainer[bid]
+            rollout_gen = self._per_building_rollout[bid]
+            wm_bid = "0"  # independent models have only 1 building (index 0)
+        else:
+            wm_trainer = self.dyna.wm_trainer
+            rollout_gen = self.dyna.rollout_gen
+            wm_bid = bid_str
+
         # 1. Update world model on THIS building's data
         if global_step % self.config.dyna.model_update_freq == 0:
             batch = self.real_buffer.sample_tagged(batch_size, bid_idx, self.device)
@@ -275,11 +336,11 @@ class MultiBuildingDynaSAC:
                 td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
                 weights = 1.0 + td_error / (td_error.mean() + 1e-8)
 
-            self.dyna.wm_trainer.train_step(
+            wm_trainer.train_step(
                 batch["states"],
                 batch["actions"],
                 batch["next_states"],
-                bid_str,
+                wm_bid,
                 weights,
             )
 
@@ -291,9 +352,7 @@ class MultiBuildingDynaSAC:
                 n_rollouts, bid_idx, self.device
             )
             start_states = start_batch["states"].cpu().numpy()
-            rollout_data = self.dyna.rollout_gen.generate(
-                start_states, bid_str, horizon
-            )
+            rollout_data = rollout_gen.generate(start_states, wm_bid, horizon)
             self.model_buffers[bid].add_batch(
                 rollout_data["states"],
                 rollout_data["actions"],
