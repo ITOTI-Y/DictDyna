@@ -303,7 +303,6 @@ class MultiBuildingDynaSAC:
         bid_str = str(bid_idx)
         batch_size = self.config.batch_size
 
-        # Need enough data for this building
         if self.real_buffer.tag_count(bid_idx) < batch_size:
             return
 
@@ -311,38 +310,27 @@ class MultiBuildingDynaSAC:
         if self.independent_dict and bid in self._per_building_wm:
             wm_trainer = self._per_building_trainer[bid]
             rollout_gen = self._per_building_rollout[bid]
-            wm_bid = "0"  # independent models have only 1 building (index 0)
+            wm_bid = "0"
         else:
             wm_trainer = self.dyna.wm_trainer
             rollout_gen = self.dyna.rollout_gen
             wm_bid = bid_str
 
-        # 1. Update world model on THIS building's data
+        # 1. Update world model
         if global_step % self.config.dyna.model_update_freq == 0:
-            batch = self.real_buffer.sample_tagged(batch_size, bid_idx, self.device)
-
-            # TD-error weights (reward-aware WM training)
-            with torch.no_grad():
-                next_actions, _ = self.dyna.actor(batch["next_states"])
-                q1_next, q2_next = self.dyna.critic_target(
-                    batch["next_states"], next_actions
-                )
-                q_next = torch.min(q1_next, q2_next)
-                target_q = (
-                    batch["rewards"]
-                    + (1.0 - batch["dones"]) * self.config.gamma * q_next
-                )
-                q1, q2 = self.dyna.critic(batch["states"], batch["actions"])
-                td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
-                weights = 1.0 + td_error / (td_error.mean() + 1e-8)
-
-            wm_trainer.train_step(
-                batch["states"],
-                batch["actions"],
-                batch["next_states"],
-                wm_bid,
-                weights,
-            )
+            if self.independent_dict:
+                batch = self.real_buffer.sample_tagged(batch_size, bid_idx, self.device)
+                self._wm_update(wm_trainer, batch, wm_bid)
+            else:
+                # Shared: train on ALL buildings (anti-forgetting)
+                per_bld = max(batch_size // self.n_buildings, 32)
+                for other_idx, _other_bid_name in enumerate(self.building_ids):
+                    if self.real_buffer.tag_count(other_idx) < per_bld:
+                        continue
+                    batch = self.real_buffer.sample_tagged(
+                        per_bld, other_idx, self.device
+                    )
+                    self._wm_update(wm_trainer, batch, str(other_idx))
 
         # 2. Model rollouts (after warmup)
         if global_step >= self.config.dyna.rollout_start_step:
@@ -361,7 +349,7 @@ class MultiBuildingDynaSAC:
                 rollout_data["dones"],
             )
 
-        # 3. SAC update on mixed data (real from ALL buildings + model from THIS)
+        # 3. SAC update (real from ALL buildings + model from THIS)
         real_batch = self.real_buffer.sample(batch_size, self.device)
         model_ratio = self.config.dyna.model_to_real_ratio
         n_model = int(batch_size * model_ratio)
@@ -369,7 +357,6 @@ class MultiBuildingDynaSAC:
         if n_model > 0 and len(self.model_buffers[bid]) >= n_model:
             model_batch = self.model_buffers[bid].sample(n_model, self.device)
             n_real = batch_size - n_model
-            # Trim real batch
             mixed = {
                 k: torch.cat([real_batch[k][:n_real], model_batch[k]], dim=0)
                 for k in real_batch
@@ -383,6 +370,33 @@ class MultiBuildingDynaSAC:
             mixed["rewards"],
             mixed["next_states"],
             mixed["dones"],
+        )
+
+    def _wm_update(
+        self,
+        wm_trainer: WorldModelTrainer,
+        batch: dict[str, torch.Tensor],
+        bid_str: str,
+    ) -> None:
+        """World model update with TD-error weighted loss."""
+        with torch.no_grad():
+            next_actions, _ = self.dyna.actor(batch["next_states"])
+            q1_next, q2_next = self.dyna.critic_target(
+                batch["next_states"], next_actions
+            )
+            q_next = torch.min(q1_next, q2_next)
+            target_q = (
+                batch["rewards"] + (1.0 - batch["dones"]) * self.config.gamma * q_next
+            )
+            q1, q2 = self.dyna.critic(batch["states"], batch["actions"])
+            td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
+            weights = 1.0 + td_error / (td_error.mean() + 1e-8)
+        wm_trainer.train_step(
+            batch["states"],
+            batch["actions"],
+            batch["next_states"],
+            bid_str,
+            weights,
         )
 
     def _save_results(
