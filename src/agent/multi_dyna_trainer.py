@@ -163,8 +163,18 @@ class MultiBuildingDynaSAC:
                 else:
                     action = self.dyna.select_action(obs[bid])
 
-                # Step environment
-                raw_next, reward, term, trunc, _ = self.envs[bid].step(action)
+                # Step environment (with crash protection)
+                try:
+                    raw_next, reward, term, trunc, _ = self.envs[bid].step(action)
+                except Exception as e:
+                    logger.warning(f"[{bid}] env.step crashed: {e}, recreating env")
+                    with contextlib.suppress(Exception):
+                        self.envs[bid].close()
+                    cfg = self.building_configs[bid_idx]
+                    with sinergym_workdir():
+                        self.envs[bid] = gymnasium.make(cfg["env_name"])
+                    raw_next, _ = self.envs[bid].reset()
+                    reward, term, trunc = 0.0, False, True
                 done = term or trunc
                 next_obs = self._normalize_obs(raw_next)
 
@@ -197,11 +207,19 @@ class MultiBuildingDynaSAC:
                         f"Step {global_step}/{total_steps} | "
                         f"Reward: {episode_rewards[bid]:.1f}"
                     )
+                    # Save intermediate results at each episode boundary
+                    self._save_results(all_episode_rewards, eval_history)
                     # Clear this building's model buffer
                     self.model_buffers[bid].pos = 0
                     self.model_buffers[bid].size = 0
                     self.dyna.exploration.apply_decay()
                     episode_rewards[bid] = 0.0
+                    # Recreate env to avoid EnergyPlus SIGSEGV on reset
+                    with contextlib.suppress(Exception):
+                        self.envs[bid].close()
+                    cfg = self.building_configs[bid_idx]
+                    with sinergym_workdir():
+                        self.envs[bid] = gymnasium.make(cfg["env_name"])
                     raw_obs, _ = self.envs[bid].reset()
                     obs[bid] = self._normalize_obs(raw_obs)
 
