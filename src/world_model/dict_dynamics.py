@@ -121,11 +121,22 @@ class DictDynamicsModel(nn.Module):
         next_state: torch.Tensor,
         building_id: str = "0",
         sparsity_lambda: float = 0.1,
+        sample_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute world model loss: MSE + lambda * L1."""
+        """Compute world model loss: weighted MSE + lambda * L1.
+
+        Args:
+            sample_weights: Per-sample importance weights, shape (batch,).
+                If provided, MSE is weighted: transitions with higher
+                TD-error or reward magnitude are reconstructed more accurately.
+        """
         pred_next, alpha = self.forward(state, action, building_id)
 
-        mse_loss = torch.mean((next_state - pred_next) ** 2)
+        per_sample_mse = ((next_state - pred_next) ** 2).mean(dim=-1)  # (batch,)
+        if sample_weights is not None:
+            mse_loss = (per_sample_mse * sample_weights).mean()
+        else:
+            mse_loss = per_sample_mse.mean()
         l1_loss = torch.mean(torch.abs(alpha))
         total_loss = mse_loss + sparsity_lambda * l1_loss
 

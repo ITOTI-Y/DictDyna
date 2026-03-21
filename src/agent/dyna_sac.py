@@ -9,6 +9,7 @@ from loguru import logger
 from src.agent.replay_buffer import MixedReplayBuffer
 from src.agent.rollout import ModelRollout
 from src.agent.sac import GaussianActor, SACTrainer, SoftQNetwork
+from src.agent.sparse_exploration import SparseCodeExploration
 from src.schemas import TrainSchema
 from src.utils import get_device
 from src.world_model.dict_dynamics import DictDynamicsModel
@@ -123,11 +124,15 @@ class DynaSAC:
             sparsity_lambda=config.dictionary.sparsity_lambda,
         )
 
-        # Build rollout generator
+        # Build sparse-code exploration module
+        self.exploration = SparseCodeExploration(eta=0.1)
+
+        # Build rollout generator (with exploration bonus)
         self.rollout_gen = ModelRollout(
             world_model=self.world_model,
             actor=self.actor,
             reward_estimator=self.reward_estimator,
+            exploration=self.exploration,
             device=self.device,
         )
 
@@ -176,14 +181,31 @@ class DynaSAC:
         if self.buffer.real_size < self.config.batch_size:
             return metrics
 
-        # 2. Update world model (always, using real data only)
+        # 2. Update world model (reward-weighted: high TD-error → higher weight)
         if global_step % self.config.dyna.model_update_freq == 0:
             batch = self.buffer.real_buffer.sample(self.config.batch_size, self.device)
+
+            # Compute TD-error based sample weights
+            with torch.no_grad():
+                next_actions, _next_log_probs = self.actor(batch["next_states"])
+                q1_next, q2_next = self.critic_target(
+                    batch["next_states"], next_actions
+                )
+                q_next = torch.min(q1_next, q2_next)
+                target_q = batch["rewards"] + (
+                    1.0 - batch["dones"]
+                ) * self.config.gamma * q_next
+                q1, q2 = self.critic(batch["states"], batch["actions"])
+                td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
+                # Normalize to [1, 1+beta] range
+                weights = 1.0 + td_error / (td_error.mean() + 1e-8)
+
             wm_metrics = self.wm_trainer.train_step(
                 batch["states"],
                 batch["actions"],
                 batch["next_states"],
                 bid_idx,
+                sample_weights=weights,
             )
             metrics.update({f"wm/{k}": v for k, v in wm_metrics.items()})
 
@@ -210,6 +232,9 @@ class DynaSAC:
             metrics["diag/model_state_std"] = float(rollout_data["next_states"].std())
             metrics["diag/real_reward"] = reward
             metrics["diag/model_buf_size"] = float(self.buffer.model_size)
+            metrics["diag/explore_n_patterns"] = float(
+                self.exploration.n_unique_patterns
+            )
 
         # 4. SAC update (pure real data during warmup, mixed after)
         model_ratio = self.config.dyna.model_to_real_ratio if use_model else 0.0
@@ -234,8 +259,9 @@ class DynaSAC:
         return metrics
 
     def on_episode_end(self) -> None:
-        """Clear model buffer at episode boundary (MBPO-style freshness)."""
+        """Clear model buffer and decay exploration counts at episode boundary."""
         self.buffer.clear_model_buffer()
+        self.exploration.apply_decay()
 
     def select_action(
         self, state: np.ndarray, deterministic: bool = False

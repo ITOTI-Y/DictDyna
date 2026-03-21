@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from src.agent.sac import GaussianActor
+from src.agent.sparse_exploration import SparseCodeExploration
 from src.world_model.dict_dynamics import DictDynamicsModel
 from src.world_model.reward_estimator import SinergymRewardEstimator
 
@@ -11,10 +12,13 @@ from src.world_model.reward_estimator import SinergymRewardEstimator
 class ModelRollout:
     """Generate simulated rollouts using the world model.
 
+    Optionally adds sparse-code exploration bonus to rollout rewards.
+
     Args:
         world_model: DictDynamicsModel instance.
         actor: GaussianActor policy for action selection.
         reward_estimator: Reward estimator from predicted states.
+        exploration: SparseCodeExploration for intrinsic reward bonus.
         device: Torch device.
     """
 
@@ -23,11 +27,13 @@ class ModelRollout:
         world_model: DictDynamicsModel,
         actor: GaussianActor,
         reward_estimator: SinergymRewardEstimator,
+        exploration: SparseCodeExploration | None = None,
         device: torch.device | None = None,
     ) -> None:
         self.world_model = world_model
         self.actor = actor
         self.reward_estimator = reward_estimator
+        self.exploration = exploration
         self.device = device or torch.device("cpu")
 
     @torch.no_grad()
@@ -65,11 +71,15 @@ class ModelRollout:
             # Select actions using policy
             actions, _ = self.actor(current_states)
 
-            # Predict next states using world model
-            next_states = self.world_model.predict(current_states, actions, building_id)
+            # Predict next states using world model (get alpha for exploration)
+            next_states, alpha = self.world_model(
+                current_states, actions, building_id
+            )
 
-            # Estimate rewards from predicted states
+            # Estimate rewards from predicted states + exploration bonus
             rewards = self.reward_estimator.estimate(next_states)
+            if self.exploration is not None:
+                rewards = rewards + self.exploration.compute_bonus(alpha)
 
             states_list.append(current_states.cpu().numpy())
             actions_list.append(actions.cpu().numpy())

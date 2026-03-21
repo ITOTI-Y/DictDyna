@@ -40,15 +40,21 @@ class WorldModelTrainer:
         actions: torch.Tensor,
         next_states: torch.Tensor,
         building_id: str = "0",
+        sample_weights: torch.Tensor | None = None,
     ) -> dict[str, float]:
         """Single training step.
+
+        Args:
+            sample_weights: Per-sample importance weights for reward-aware
+                training. Higher weight = more accurate reconstruction.
 
         Returns:
             Dict of training metrics.
         """
         self.model.train()
         loss, metrics = self.model.compute_loss(
-            states, actions, next_states, building_id, self.sparsity_lambda
+            states, actions, next_states, building_id,
+            self.sparsity_lambda, sample_weights,
         )
 
         self.optimizer.zero_grad()
