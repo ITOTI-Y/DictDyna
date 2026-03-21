@@ -192,9 +192,10 @@ class DynaSAC:
                     batch["next_states"], next_actions
                 )
                 q_next = torch.min(q1_next, q2_next)
-                target_q = batch["rewards"] + (
-                    1.0 - batch["dones"]
-                ) * self.config.gamma * q_next
+                target_q = (
+                    batch["rewards"]
+                    + (1.0 - batch["dones"]) * self.config.gamma * q_next
+                )
                 q1, q2 = self.critic(batch["states"], batch["actions"])
                 td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
                 # Normalize to [1, 1+beta] range

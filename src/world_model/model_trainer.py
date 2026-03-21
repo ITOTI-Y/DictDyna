@@ -53,8 +53,12 @@ class WorldModelTrainer:
         """
         self.model.train()
         loss, metrics = self.model.compute_loss(
-            states, actions, next_states, building_id,
-            self.sparsity_lambda, sample_weights,
+            states,
+            actions,
+            next_states,
+            building_id,
+            self.sparsity_lambda,
+            sample_weights,
         )
 
         self.optimizer.zero_grad()

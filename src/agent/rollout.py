@@ -72,9 +72,7 @@ class ModelRollout:
             actions, _ = self.actor(current_states)
 
             # Predict next states using world model (get alpha for exploration)
-            next_states, alpha = self.world_model(
-                current_states, actions, building_id
-            )
+            next_states, alpha = self.world_model(current_states, actions, building_id)
 
             # Estimate rewards from predicted states + exploration bonus
             rewards = self.reward_estimator.estimate(next_states)

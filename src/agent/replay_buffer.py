@@ -178,3 +178,84 @@ class MixedReplayBuffer:
     @property
     def model_size(self) -> int:
         return len(self.model_buffer)
+
+
+class TaggedReplayBuffer:
+    """Replay buffer with building_id tags for multi-building training.
+
+    Supports sampling all data (for shared SAC) or filtered by tag
+    (for per-building world model training).
+
+    Args:
+        capacity: Maximum number of transitions.
+        state_dim: State dimension.
+        action_dim: Action dimension.
+    """
+
+    def __init__(self, capacity: int, state_dim: int, action_dim: int) -> None:
+        self.capacity = capacity
+        self.states = np.zeros((capacity, state_dim), dtype=np.float32)
+        self.actions = np.zeros((capacity, action_dim), dtype=np.float32)
+        self.rewards = np.zeros((capacity, 1), dtype=np.float32)
+        self.next_states = np.zeros((capacity, state_dim), dtype=np.float32)
+        self.dones = np.zeros((capacity, 1), dtype=np.float32)
+        self.tags = np.full(capacity, -1, dtype=np.int32)
+        self.pos = 0
+        self.size = 0
+
+    def add(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        reward: float | np.ndarray,
+        next_state: np.ndarray,
+        done: bool | np.ndarray,
+        tag: int = 0,
+    ) -> None:
+        """Add a single transition with building tag."""
+        self.states[self.pos] = state
+        self.actions[self.pos] = action
+        self.rewards[self.pos] = np.float32(reward).item()
+        self.next_states[self.pos] = next_state
+        self.dones[self.pos] = np.float32(done).item()
+        self.tags[self.pos] = tag
+        self.pos = (self.pos + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(
+        self, batch_size: int, device: torch.device | None = None
+    ) -> dict[str, torch.Tensor]:
+        """Sample from ALL data regardless of tag (for shared SAC)."""
+        device = device or torch.device("cpu")
+        indices = np.random.randint(0, self.size, size=batch_size)
+        return {
+            "states": torch.tensor(self.states[indices], device=device),
+            "actions": torch.tensor(self.actions[indices], device=device),
+            "rewards": torch.tensor(self.rewards[indices], device=device),
+            "next_states": torch.tensor(self.next_states[indices], device=device),
+            "dones": torch.tensor(self.dones[indices], device=device),
+        }
+
+    def sample_tagged(
+        self, batch_size: int, tag: int, device: torch.device | None = None
+    ) -> dict[str, torch.Tensor]:
+        """Sample only transitions with a specific building tag."""
+        device = device or torch.device("cpu")
+        valid = np.where(self.tags[: self.size] == tag)[0]
+        if len(valid) == 0:
+            raise ValueError(f"No data for tag {tag}")
+        indices = valid[np.random.randint(0, len(valid), size=batch_size)]
+        return {
+            "states": torch.tensor(self.states[indices], device=device),
+            "actions": torch.tensor(self.actions[indices], device=device),
+            "rewards": torch.tensor(self.rewards[indices], device=device),
+            "next_states": torch.tensor(self.next_states[indices], device=device),
+            "dones": torch.tensor(self.dones[indices], device=device),
+        }
+
+    def tag_count(self, tag: int) -> int:
+        """Count transitions with a specific tag."""
+        return int((self.tags[: self.size] == tag).sum())
+
+    def __len__(self) -> int:
+        return self.size

@@ -171,6 +171,68 @@ def train(
     logger.info(f"Dyna-SAC training done: {n_episodes} episodes completed")
 
 
+@app.command("multi-train")
+def multi_train(
+    config: ConfigOption = None,
+    override: OverrideOption = None,
+    seed: Annotated[int, typer.Option(help="Random seed")] = 42,
+    dict_path: Annotated[
+        str, typer.Option("--dict", help="Pretrained dictionary path")
+    ] = "output/pretrained/dict_k128.pt",
+    total_timesteps: Annotated[
+        int, typer.Option("--steps", help="Total training timesteps")
+    ] = 105120,
+    independent_dict: Annotated[
+        bool, typer.Option("--independent/--shared", help="Independent vs shared dict")
+    ] = False,
+) -> None:
+    """Phase III: Multi-building Dyna-SAC with shared dictionary."""
+    cfg = _load_config(config, override)
+    mode = "independent" if independent_dict else "shared"
+    logger.info(f"Starting multi-building Dyna-SAC (seed={seed}, mode={mode})")
+
+    from src.agent.multi_dyna_trainer import MultiBuildingDynaSAC
+    from src.schemas import TrainSchema
+
+    train_fields = {}
+    for k, v in cfg.items():
+        if k in TrainSchema.model_fields:
+            train_fields[k] = v
+    train_fields["seed"] = seed
+    train_fields["total_timesteps"] = total_timesteps
+    train_fields["device"] = cfg.get("device", "auto")
+    train_cfg = TrainSchema(**train_fields)
+
+    # Default 3 office buildings
+    env_cfg = cfg.get("env", {})
+    buildings = env_cfg.get(
+        "buildings",
+        [
+            {"env_name": "Eplus-5zone-hot-continuous-v1", "building_id": "office_hot"},
+            {
+                "env_name": "Eplus-5zone-mixed-continuous-v1",
+                "building_id": "office_mixed",
+            },
+            {
+                "env_name": "Eplus-5zone-cool-continuous-v1",
+                "building_id": "office_cool",
+            },
+        ],
+    )
+
+    save_dir = f"output/results/multi_dyna/{mode}_s{seed}"
+    trainer = MultiBuildingDynaSAC(
+        building_configs=buildings,
+        dict_path=dict_path,
+        config=train_cfg,
+        seed=seed,
+        save_dir=save_dir,
+        independent_dict=independent_dict,
+    )
+    trainer.train()
+    logger.info(f"Multi-building training done ({mode})")
+
+
 @app.command()
 def transfer(
     config: ConfigOption = None,
