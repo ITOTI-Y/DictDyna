@@ -256,15 +256,13 @@ class FewShotTransferExperiment:
         for param in dyna.world_model.encoder.adapters[target_idx].parameters():
             param.requires_grad_(True)
 
-        adapt_s = torch.tensor(
-            target_data["states"][:n_adapt_steps], device=self.device
-        )
-        adapt_a = torch.tensor(
-            target_data["actions"][:n_adapt_steps], device=self.device
-        )
-        adapt_sn = torch.tensor(
-            target_data["next_states"][:n_adapt_steps], device=self.device
-        )
+        # Uniformly sample across the full episode (not just first N steps)
+        # This ensures adaptation data covers all seasons
+        total = len(target_data["states"])
+        indices = np.linspace(0, total - 1, n_adapt_steps, dtype=int)
+        adapt_s = torch.tensor(target_data["states"][indices], device=self.device)
+        adapt_a = torch.tensor(target_data["actions"][indices], device=self.device)
+        adapt_sn = torch.tensor(target_data["next_states"][indices], device=self.device)
 
         optimizer = torch.optim.Adam(
             dyna.world_model.encoder.adapters[target_idx].parameters(),
@@ -283,8 +281,8 @@ class FewShotTransferExperiment:
         for param in dyna.world_model.parameters():
             param.requires_grad_(True)
 
-        # Step 2: Fill buffer with target data + do Dyna-SAC updates
-        for i in range(n_adapt_steps):
+        # Step 2: Fill buffer with same sampled data
+        for i in indices:
             dyna.buffer.add_real(
                 target_data["states"][i],
                 target_data["actions"][i],
@@ -342,10 +340,12 @@ class FewShotTransferExperiment:
             action_bias=self.action_bias,
         )
 
-        # Train world model on limited data
-        s = torch.tensor(target_data["states"][:n_steps], device=self.device)
-        a = torch.tensor(target_data["actions"][:n_steps], device=self.device)
-        sn = torch.tensor(target_data["next_states"][:n_steps], device=self.device)
+        # Train world model on uniformly sampled data (same as transfer)
+        total = len(target_data["states"])
+        indices = np.linspace(0, total - 1, n_steps, dtype=int)
+        s = torch.tensor(target_data["states"][indices], device=self.device)
+        a = torch.tensor(target_data["actions"][indices], device=self.device)
+        sn = torch.tensor(target_data["next_states"][indices], device=self.device)
 
         for _epoch in range(50):
             dyna.world_model.train()
@@ -355,8 +355,8 @@ class FewShotTransferExperiment:
             dyna.wm_trainer.optimizer.step()
             dyna.world_model.normalize_atoms()
 
-        # Fill buffer with target data
-        for i in range(n_steps):
+        # Fill buffer with same sampled data
+        for i in indices:
             dyna.buffer.add_real(
                 target_data["states"][i],
                 target_data["actions"][i],
