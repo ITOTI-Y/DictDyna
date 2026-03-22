@@ -325,7 +325,7 @@ class FewShotTransferExperiment:
             dyna.wm_trainer.optimizer.step()
             dyna.world_model.normalize_atoms()
 
-        # Train SAC on limited data + rollouts
+        # Fill buffer with target data
         for i in range(n_steps):
             dyna.buffer.add_real(
                 target_data["states"][i],
@@ -335,19 +335,33 @@ class FewShotTransferExperiment:
                 False,
             )
 
-        # Do some SAC updates
-        if n_steps >= self.config.batch_size:
-            for _ in range(200):
-                batch = dyna.buffer.real_buffer.sample(
-                    min(self.config.batch_size, n_steps), self.device
+        # SAC updates with rollouts (SAME as transfer for fairness)
+        batch_size = min(self.config.batch_size, n_steps)
+        n_sac_updates = max(200, n_steps)
+        for step in range(n_sac_updates):
+            # Generate rollouts (same as transfer)
+            if n_steps >= batch_size and step >= 50:
+                start = dyna.buffer.real_buffer.sample(5, self.device)
+                rollout = dyna.rollout_gen.generate(
+                    start["states"].cpu().numpy(), "0", horizon=1
                 )
-                dyna.sac_trainer.update(
-                    batch["states"],
-                    batch["actions"],
-                    batch["rewards"],
-                    batch["next_states"],
-                    batch["dones"],
+                dyna.buffer.add_model_batch(
+                    rollout["states"],
+                    rollout["actions"],
+                    rollout["rewards"],
+                    rollout["next_states"],
+                    rollout["dones"],
                 )
+
+            # SAC update
+            batch = dyna.buffer.real_buffer.sample(batch_size, self.device)
+            dyna.sac_trainer.update(
+                batch["states"],
+                batch["actions"],
+                batch["rewards"],
+                batch["next_states"],
+                batch["dones"],
+            )
 
         eval_reward = self._evaluate_on_target(dyna, "0")
         return eval_reward
