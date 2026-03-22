@@ -108,7 +108,7 @@ class FewShotTransferExperiment:
             scratch_reward = self._run_from_scratch(target_data, steps)
             results[f"scratch_{days}d"] = scratch_reward
 
-            adv = (scratch_reward - transfer_reward) / abs(scratch_reward) * 100
+            adv = (transfer_reward - scratch_reward) / abs(scratch_reward) * 100
             logger.info(
                 f"  {days}d: Transfer={transfer_reward:.1f}, "
                 f"Scratch={scratch_reward:.1f}, Advantage={adv:+.1f}%"
@@ -224,6 +224,11 @@ class FewShotTransferExperiment:
         target_idx = str(n_buildings)
 
         dyna.world_model.encoder.add_adapter(target_idx)
+        # Warm-start adapter from first source building
+        src_adapter_id = "0"
+        if src_adapter_id in dyna.world_model.encoder.adapters:
+            src_state = dyna.world_model.encoder.adapters[src_adapter_id].state_dict()
+            dyna.world_model.encoder.adapters[target_idx].load_state_dict(src_state)
         dyna.world_model.encoder.to(self.device)
 
         # Step 1: Fine-tune WM adapter on limited data
@@ -254,6 +259,7 @@ class FewShotTransferExperiment:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            dyna.world_model.normalize_atoms()
 
         for param in dyna.world_model.parameters():
             param.requires_grad_(True)
@@ -286,8 +292,11 @@ class FewShotTransferExperiment:
                     rollout["dones"],
                 )
 
-            # SAC update
-            batch = dyna.buffer.real_buffer.sample(batch_size, self.device)
+            # SAC update (use mixed buffer: real + model data)
+            ratio = self.config.dyna.model_to_real_ratio if step >= 50 else 0.0
+            batch = dyna.buffer.sample(
+                batch_size, model_ratio=ratio, device=self.device
+            )
             dyna.sac_trainer.update(
                 batch["states"],
                 batch["actions"],
@@ -301,12 +310,14 @@ class FewShotTransferExperiment:
 
     def _run_from_scratch(self, target_data: dict, n_steps: int) -> float:
         """Train from scratch with only n_steps of target data."""
-        # Fresh Dyna-SAC with random encoder
+        # Fresh Dyna-SAC with random dictionary + random encoder (true scratch)
+        random_dict = torch.randn_like(self.dictionary)
+        random_dict = random_dict / random_dict.norm(dim=0, keepdim=True)
         dyna = DynaSAC(
             state_dim=self.state_dim,
             action_dim=self.action_dim,
             building_ids=["scratch"],
-            dictionary=self.dictionary,
+            dictionary=random_dict,
             config=self.config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
@@ -353,8 +364,11 @@ class FewShotTransferExperiment:
                     rollout["dones"],
                 )
 
-            # SAC update
-            batch = dyna.buffer.real_buffer.sample(batch_size, self.device)
+            # SAC update (mixed buffer, same as transfer)
+            ratio = self.config.dyna.model_to_real_ratio if step >= 50 else 0.0
+            batch = dyna.buffer.sample(
+                batch_size, model_ratio=ratio, device=self.device
+            )
             dyna.sac_trainer.update(
                 batch["states"],
                 batch["actions"],
