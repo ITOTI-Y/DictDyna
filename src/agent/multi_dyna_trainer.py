@@ -99,6 +99,45 @@ class MultiBuildingDynaSAC:
             obs_std=dict_data["obs_std"],
         )
 
+        # Replace world model with shared-private version for shared mode
+        if not independent_dict:
+            from src.world_model.shared_private_dynamics import SharedPrivateWorldModel
+
+            n_shared = dictionary.shape[1]  # 128 pretrained atoms → 64 shared
+            sp_model = SharedPrivateWorldModel(
+                shared_dict=dictionary[:, : n_shared // 2].to(self.device),
+                n_private_atoms=n_shared // 2,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                hidden_dims=config.encoder.shared_hidden_dims,
+                adapter_dim=config.encoder.adapter_dim,
+                n_buildings=self.n_buildings,
+                topk_shared=config.encoder.topk_k // 2,
+                topk_private=config.encoder.topk_k // 2,
+            ).to(self.device)
+            # Replace DynaSAC's world model and trainer
+            self.dyna.world_model = sp_model
+            self.dyna.wm_trainer = WorldModelTrainer(
+                model=sp_model,  # ty: ignore[invalid-argument-type]
+                encoder_lr=config.dictionary.pretrain_lr,
+                dict_lr=config.dictionary.slow_update_lr,
+                sparsity_lambda=config.dictionary.sparsity_lambda,
+            )
+            # Update rollout generator
+            from src.agent.rollout import ModelRollout
+
+            self.dyna.rollout_gen = ModelRollout(
+                world_model=sp_model,  # ty: ignore[invalid-argument-type]
+                actor=self.dyna.actor,
+                reward_estimator=self.dyna.reward_estimator,
+                exploration=self.dyna.exploration,
+                device=self.device,
+            )
+            logger.info(
+                f"Shared-Private model: {n_shared // 2} shared (frozen) + "
+                f"{n_shared // 2} private (trainable) atoms"
+            )
+
         # Independent dict mode: per-building world models
         self._per_building_wm: dict[str, DictDynamicsModel] = {}
         self._per_building_trainer: dict[str, WorldModelTrainer] = {}
