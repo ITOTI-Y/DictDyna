@@ -220,6 +220,25 @@ class FewShotTransferExperiment:
         # Deep copy so each data budget starts fresh from source
         dyna = copy.deepcopy(source_dyna)
 
+        # Reset optimizer states (prevent source Adam momentum from leaking)
+        dyna.sac_trainer.actor_optimizer = torch.optim.Adam(
+            dyna.actor.parameters(), lr=self.config.sac.actor_lr
+        )
+        dyna.sac_trainer.critic_optimizer = torch.optim.Adam(
+            dyna.critic.parameters(), lr=self.config.sac.critic_lr
+        )
+        if dyna.sac_trainer.autotune_alpha:
+            dyna.sac_trainer.alpha_optimizer = torch.optim.Adam(
+                [dyna.sac_trainer.log_alpha], lr=self.config.sac.alpha_lr
+            )
+        # Clear buffers from source training
+        dyna.buffer = type(dyna.buffer)(
+            real_capacity=self.config.buffer_size,
+            model_capacity=min(self.config.buffer_size, 10_000),
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+        )
+
         n_buildings = len(self.source_configs)
         target_idx = str(n_buildings)
 
