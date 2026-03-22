@@ -138,11 +138,13 @@ class MultiBuildingDynaSAC:
                 topk_k=config.encoder.topk_k,
             ).to(self.device)
 
-            # Independent dictionary (own copy of D)
+            # Independent dictionary (random init, no cross-building pretrain)
+            random_dict = torch.randn_like(base_dict)
+            random_dict = random_dict / random_dict.norm(dim=0, keepdim=True)
             wm = DictDynamicsModel(
-                dictionary=base_dict.clone().to(self.device),
+                dictionary=random_dict.to(self.device),
                 sparse_encoder=encoder,
-                learnable_dict=config.dictionary.slow_update_lr > 0,
+                learnable_dict=True,  # must learn from scratch
             ).to(self.device)
 
             trainer = WorldModelTrainer(
