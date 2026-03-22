@@ -238,7 +238,7 @@ class SharedPrivateWorldModel(nn.Module):
         action: torch.Tensor,
         building_id: str = "0",
     ) -> torch.Tensor:
-        next_state, _, _ = self.forward(state, action, building_id)
+        next_state, _ = self.forward(state, action, building_id)
         return next_state
 
     def compute_loss(
@@ -251,7 +251,10 @@ class SharedPrivateWorldModel(nn.Module):
         sample_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute loss with separate sparsity for shared/private."""
-        pred, alpha_s, alpha_p = self.forward(state, action, building_id)
+        # Get separate alpha_s and alpha_p from encoder directly
+        alpha_s, alpha_p = self.encoder(state, action, building_id)
+        delta = self.dynamics(alpha_s, alpha_p)
+        pred = state + delta
 
         per_sample_mse = ((next_state - pred) ** 2).mean(dim=-1)
         if sample_weights is not None:
