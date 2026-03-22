@@ -214,22 +214,24 @@ class FewShotTransferExperiment:
     def _run_transfer(
         self, source_dyna: DynaSAC, target_data: dict, n_adapt_steps: int
     ) -> float:
-        """Transfer: fine-tune adapter on limited target data, then evaluate."""
-        # Add new adapter for target building
+        """Transfer: fine-tune adapter + SAC on limited target data."""
+        import copy
+
+        # Deep copy so each data budget starts fresh from source
+        dyna = copy.deepcopy(source_dyna)
 
         n_buildings = len(self.source_configs)
-        target_idx = str(n_buildings)  # next index
+        target_idx = str(n_buildings)
 
-        source_dyna.world_model.encoder.add_adapter(target_idx)
-        source_dyna.world_model.encoder.to(self.device)
+        dyna.world_model.encoder.add_adapter(target_idx)
+        dyna.world_model.encoder.to(self.device)
 
-        # Freeze everything except new adapter
-        for param in source_dyna.world_model.parameters():
+        # Step 1: Fine-tune WM adapter on limited data
+        for param in dyna.world_model.parameters():
             param.requires_grad_(False)
-        for param in source_dyna.world_model.encoder.adapters[target_idx].parameters():
+        for param in dyna.world_model.encoder.adapters[target_idx].parameters():
             param.requires_grad_(True)
 
-        # Fine-tune adapter on limited data
         adapt_s = torch.tensor(
             target_data["states"][:n_adapt_steps], device=self.device
         )
@@ -241,25 +243,60 @@ class FewShotTransferExperiment:
         )
 
         optimizer = torch.optim.Adam(
-            source_dyna.world_model.encoder.adapters[target_idx].parameters(),
+            dyna.world_model.encoder.adapters[target_idx].parameters(),
             lr=1e-3,
         )
-
         for _epoch in range(50):
-            source_dyna.world_model.train()
-            loss, _ = source_dyna.world_model.compute_loss(
+            dyna.world_model.train()
+            loss, _ = dyna.world_model.compute_loss(
                 adapt_s, adapt_a, adapt_sn, target_idx, 0.1
             )
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-        # Restore grad flags
-        for param in source_dyna.world_model.parameters():
+        for param in dyna.world_model.parameters():
             param.requires_grad_(True)
 
-        # Evaluate: run Dyna-SAC on target with adapted world model
-        eval_reward = self._evaluate_on_target(source_dyna, target_idx)
+        # Step 2: Fill buffer with target data + do Dyna-SAC updates
+        for i in range(n_adapt_steps):
+            dyna.buffer.add_real(
+                target_data["states"][i],
+                target_data["actions"][i],
+                target_data["rewards"][i],
+                target_data["next_states"][i],
+                False,
+            )
+
+        # SAC updates using real target data + model rollouts
+        batch_size = min(self.config.batch_size, n_adapt_steps)
+        n_sac_updates = max(200, n_adapt_steps)
+        for step in range(n_sac_updates):
+            # Generate rollouts from adapted WM
+            if n_adapt_steps >= batch_size and step >= 50:
+                start = dyna.buffer.real_buffer.sample(5, self.device)
+                rollout = dyna.rollout_gen.generate(
+                    start["states"].cpu().numpy(), target_idx, horizon=1
+                )
+                dyna.buffer.add_model_batch(
+                    rollout["states"],
+                    rollout["actions"],
+                    rollout["rewards"],
+                    rollout["next_states"],
+                    rollout["dones"],
+                )
+
+            # SAC update
+            batch = dyna.buffer.real_buffer.sample(batch_size, self.device)
+            dyna.sac_trainer.update(
+                batch["states"],
+                batch["actions"],
+                batch["rewards"],
+                batch["next_states"],
+                batch["dones"],
+            )
+
+        eval_reward = self._evaluate_on_target(dyna, target_idx)
         return eval_reward
 
     def _run_from_scratch(self, target_data: dict, n_steps: int) -> float:
