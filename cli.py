@@ -237,14 +237,50 @@ def multi_train(
 def transfer(
     config: ConfigOption = None,
     override: OverrideOption = None,
-    days: Annotated[int, typer.Option("-d", help="Adaptation days")] = 7,
+    seed: Annotated[int, typer.Option(help="Random seed")] = 42,
+    dict_path: Annotated[
+        str, typer.Option("--dict", help="Pretrained dictionary path")
+    ] = "output/pretrained/dict_k128.pt",
 ) -> None:
-    """Phase III: Few-shot transfer to new building."""
-    _cfg = _load_config(config, override)
-    logger.info(f"Starting few-shot transfer ({days} days adaptation)")
+    """Phase IV: Few-shot transfer to new building (1/3/7 days)."""
+    cfg = _load_config(config, override)
+    logger.info("Starting few-shot transfer experiment")
 
-    # TODO: Load checkpoint, create adapter, run adaptation
-    logger.warning("Transfer requires trained checkpoint. Run 'train' first.")
+    from src.agent.transfer_experiment import FewShotTransferExperiment
+    from src.schemas import TrainSchema
+
+    train_fields = {}
+    for k, v in cfg.items():
+        if k in TrainSchema.model_fields:
+            train_fields[k] = v
+    train_fields["seed"] = seed
+    train_fields["device"] = cfg.get("device", "auto")
+    train_cfg = TrainSchema(**train_fields)
+
+    # Source: hot + mixed, Target: cool
+    source = [
+        {"env_name": "Eplus-5zone-hot-continuous-v1", "building_id": "office_hot"},
+        {"env_name": "Eplus-5zone-mixed-continuous-v1", "building_id": "office_mixed"},
+    ]
+    target = {
+        "env_name": "Eplus-5zone-cool-continuous-v1",
+        "building_id": "office_cool",
+    }
+
+    experiment = FewShotTransferExperiment(
+        source_configs=source,
+        target_config=target,
+        dict_path=dict_path,
+        config=train_cfg,
+        adaptation_days=[1, 3, 7],
+        seed=seed,
+        save_dir=f"output/results/transfer/s{seed}",
+    )
+    results = experiment.run()
+
+    logger.info("=== Transfer Results ===")
+    for k, v in results.items():
+        logger.info(f"  {k}: {v:.1f}")
 
 
 @app.command()
