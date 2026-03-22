@@ -62,10 +62,13 @@ class FewShotTransferExperiment:
         seed_everything(seed)
 
         # Load dictionary and obs stats
+        self._dict_path = dict_path
         dict_data = torch.load(dict_path, weights_only=False)
         self.dictionary = dict_data["dictionary"]
         self._obs_mean = dict_data["obs_mean"].numpy()
         self._obs_std = dict_data["obs_std"].numpy()
+        self._obs_mean_t = dict_data.get("obs_mean")
+        self._obs_std_t = dict_data.get("obs_std")
 
         # Probe env dims
         with sinergym_workdir():
@@ -134,6 +137,8 @@ class FewShotTransferExperiment:
             config=self.config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
+            obs_mean=self._obs_mean_t,
+            obs_std=self._obs_std_t,
         )
 
         global_step = 0
@@ -292,8 +297,8 @@ class FewShotTransferExperiment:
             )
 
         # SAC updates using real target data + model rollouts
-        batch_size = min(self.config.batch_size, n_adapt_steps)
-        n_sac_updates = 200  # fixed count, independent of data budget
+        batch_size = min(64, n_adapt_steps)
+        n_sac_updates = max(200, 200 * n_adapt_steps // 96)  # scale with data
         for step in range(n_sac_updates):
             # Generate rollouts from adapted WM
             if n_adapt_steps >= batch_size and step >= 50:
@@ -338,6 +343,8 @@ class FewShotTransferExperiment:
             config=self.config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
+            obs_mean=self._obs_mean_t,
+            obs_std=self._obs_std_t,
         )
 
         # Train world model on uniformly sampled data (same as transfer)
@@ -366,8 +373,8 @@ class FewShotTransferExperiment:
             )
 
         # SAC updates with rollouts (SAME as transfer for fairness)
-        batch_size = min(self.config.batch_size, n_steps)
-        n_sac_updates = 200  # fixed count, independent of data budget
+        batch_size = min(64, n_steps)
+        n_sac_updates = max(200, 200 * n_steps // 96)  # scale with data
         for step in range(n_sac_updates):
             # Generate rollouts (same as transfer)
             if n_steps >= batch_size and step >= 50:
