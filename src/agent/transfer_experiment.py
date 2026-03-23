@@ -344,9 +344,44 @@ class FewShotTransferExperiment:
         import copy
 
         from src.world_model.context_dynamics import ContextDynamicsModel
+        from src.world_model.context_encoder import (
+            ContextConditionedEncoder,
+            ContextEncoder,
+        )
 
         dyna = copy.deepcopy(source_dyna)
-        ctx_model: ContextDynamicsModel = dyna.world_model  # type: ignore[assignment]
+
+        # Build context model reusing source dictionary
+        ctx_cfg = self.config.context
+        ctx_enc = ContextEncoder(
+            self.state_dim, self.action_dim, ctx_cfg.context_dim, ctx_cfg.hidden_dims
+        ).to(self.device)
+        cond_enc = ContextConditionedEncoder(
+            self.state_dim,
+            self.action_dim,
+            ctx_cfg.context_dim,
+            self.config.dictionary.n_atoms,
+            shared_hidden_dims=self.config.encoder.shared_hidden_dims,
+            topk_k=self.config.encoder.topk_k,
+        ).to(self.device)
+        ctx_model = ContextDynamicsModel(
+            dictionary=self.dictionary.to(self.device),
+            context_encoder=ctx_enc,
+            conditioned_encoder=cond_enc,
+            learnable_dict=True,
+        ).to(self.device)
+
+        # Replace DynaSAC's world model and rollout gen
+        dyna.world_model = ctx_model
+        from src.agent.rollout import ModelRollout
+
+        dyna.rollout_gen = ModelRollout(
+            world_model=ctx_model,  # type: ignore[arg-type]
+            actor=dyna.actor,
+            reward_estimator=dyna.reward_estimator,
+            exploration=dyna.exploration,
+            device=self.device,
+        )
 
         # Build context from uniformly sampled target transitions
         total = len(target_data["states"])
