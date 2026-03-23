@@ -49,11 +49,13 @@ class FewShotTransferExperiment:
         adaptation_days: list[int] | None = None,
         seed: int = 42,
         save_dir: str = "output/results/transfer",
+        context_mode: bool = False,
     ) -> None:
         self.source_configs = source_configs
         self.target_config = target_config
         self.adaptation_days = adaptation_days or [1, 3, 7]
         self.seed = seed
+        self.context_mode = context_mode
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.config = config
@@ -103,8 +105,13 @@ class FewShotTransferExperiment:
             steps = days * 96  # 96 steps per day at 15-min interval
             logger.info(f"\n=== Phase 3: {days}-day adaptation ({steps} steps) ===")
 
-            # 3a: Transfer (shared D + adapter fine-tune)
-            transfer_reward = self._run_transfer(source_dyna, target_data, steps)
+            # 3a: Transfer
+            if self.context_mode:
+                transfer_reward = self._run_context_transfer(
+                    source_dyna, target_data, steps
+                )
+            else:
+                transfer_reward = self._run_transfer(source_dyna, target_data, steps)
             results[f"transfer_{days}d"] = transfer_reward
 
             # 3b: Train from scratch (no transfer)
@@ -328,6 +335,110 @@ class FewShotTransferExperiment:
             )
 
         eval_reward = self._evaluate_on_target(dyna, target_idx)
+        return eval_reward
+
+    def _run_context_transfer(
+        self, source_dyna: DynaSAC, target_data: dict, n_adapt_steps: int
+    ) -> float:
+        """Context-conditioned transfer: infer z from target data, no fine-tuning."""
+        import copy
+
+        from src.world_model.context_dynamics import ContextDynamicsModel
+
+        dyna = copy.deepcopy(source_dyna)
+        ctx_model: ContextDynamicsModel = dyna.world_model  # type: ignore[assignment]
+
+        # Build context from uniformly sampled target transitions
+        total = len(target_data["states"])
+        indices = np.linspace(0, total - 1, n_adapt_steps, dtype=int)
+
+        # Use first K transitions for context inference
+        ctx_window = min(self.config.context.context_window, n_adapt_steps)
+        ctx_indices = indices[:ctx_window]
+        s_ctx = target_data["states"][ctx_indices]
+        a_ctx = target_data["actions"][ctx_indices]
+        sn_ctx = target_data["next_states"][ctx_indices]
+        delta_ctx = sn_ctx - s_ctx
+
+        # Build transition tensor: (1, K, 2*d + m)
+        transitions = np.concatenate([s_ctx, a_ctx, delta_ctx], axis=-1)
+        transitions_t = torch.tensor(
+            transitions, dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
+
+        # Infer context (zero-shot)
+        with torch.no_grad():
+            target_context = ctx_model.infer_context(transitions_t)  # (1, context_dim)
+
+        # Optional: fine-tune context encoder on target data if enough data
+        if n_adapt_steps >= 50:
+            adapt_s = torch.tensor(target_data["states"][indices], device=self.device)
+            adapt_a = torch.tensor(target_data["actions"][indices], device=self.device)
+            adapt_sn = torch.tensor(
+                target_data["next_states"][indices], device=self.device
+            )
+            context_expanded = target_context.expand(len(indices), -1)
+
+            optimizer = torch.optim.Adam(ctx_model.parameters(), lr=1e-3)
+            for _epoch in range(20):
+                ctx_model.train()
+                # Re-infer context each epoch (encoder improves)
+                target_context = ctx_model.infer_context(transitions_t)
+                context_expanded = target_context.expand(len(indices), -1)
+                loss, _ = ctx_model.compute_loss(
+                    adapt_s, adapt_a, adapt_sn, context_expanded, 0.1
+                )
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                ctx_model.normalize_atoms()
+
+            # Final context after fine-tuning
+            with torch.no_grad():
+                target_context = ctx_model.infer_context(transitions_t)
+
+        # Fill buffer with sampled target data
+        for i in indices:
+            dyna.buffer.add_real(
+                target_data["states"][i],
+                target_data["actions"][i],
+                target_data["rewards"][i],
+                target_data["next_states"][i],
+                False,
+            )
+
+        # SAC updates with context-conditioned rollouts
+        batch_size = min(64, n_adapt_steps)
+        n_sac_updates = max(200, 200 * n_adapt_steps // 96)
+        for step in range(n_sac_updates):
+            if n_adapt_steps >= batch_size and step >= 50:
+                start = dyna.buffer.real_buffer.sample(5, self.device)
+                rollout = dyna.rollout_gen.generate(
+                    start["states"].cpu().numpy(),
+                    horizon=1,
+                    context=target_context,
+                )
+                dyna.buffer.add_model_batch(
+                    rollout["states"],
+                    rollout["actions"],
+                    rollout["rewards"],
+                    rollout["next_states"],
+                    rollout["dones"],
+                )
+
+            ratio = self.config.dyna.model_to_real_ratio if step >= 50 else 0.0
+            batch = dyna.buffer.sample(
+                batch_size, model_ratio=ratio, device=self.device
+            )
+            dyna.sac_trainer.update(
+                batch["states"],
+                batch["actions"],
+                batch["rewards"],
+                batch["next_states"],
+                batch["dones"],
+            )
+
+        eval_reward = self._evaluate_on_target(dyna, "0")
         return eval_reward
 
     def _run_from_scratch(self, target_data: dict, n_steps: int) -> float:

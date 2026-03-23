@@ -192,10 +192,13 @@ def multi_train(
     independent_dict: Annotated[
         bool, typer.Option("--independent/--shared", help="Independent vs shared dict")
     ] = False,
+    context: Annotated[
+        bool, typer.Option("--context", help="Use context-conditioned world model")
+    ] = False,
 ) -> None:
     """Phase III: Multi-building Dyna-SAC with shared dictionary."""
     cfg = _load_config(config, override)
-    mode = "independent" if independent_dict else "shared"
+    mode = "context" if context else ("independent" if independent_dict else "shared")
     logger.info(f"Starting multi-building Dyna-SAC (seed={seed}, mode={mode})")
 
     from src.agent.multi_dyna_trainer import MultiBuildingDynaSAC
@@ -235,6 +238,7 @@ def multi_train(
         seed=seed,
         save_dir=save_dir,
         independent_dict=independent_dict,
+        context_mode=context,
     )
     trainer.train()
     logger.info(f"Multi-building training done ({mode})")
@@ -248,6 +252,9 @@ def transfer(
     dict_path: Annotated[
         str, typer.Option("--dict", help="Pretrained dictionary path")
     ] = "output/pretrained/dict_k128.pt",
+    context: Annotated[
+        bool, typer.Option("--context", help="Use context-conditioned transfer")
+    ] = False,
 ) -> None:
     """Phase IV: Few-shot transfer to new building (1/3/7 days)."""
     cfg = _load_config(config, override)
@@ -282,6 +289,7 @@ def transfer(
         adaptation_days=[1, 3, 7],
         seed=seed,
         save_dir=f"output/results/transfer/s{seed}",
+        context_mode=context,
     )
     results = experiment.run()
 

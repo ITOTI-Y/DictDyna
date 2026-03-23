@@ -2,6 +2,7 @@
 
 import torch
 
+from src.world_model.context_dynamics import ContextDynamicsModel
 from src.world_model.dict_dynamics import DictDynamicsModel
 
 
@@ -109,4 +110,71 @@ class WorldModelTrainer:
             _, metrics = self.model.compute_loss(
                 states, actions, next_states, building_id, self.sparsity_lambda
             )
+        return metrics
+
+
+class ContextWorldModelTrainer:
+    """Train context-conditioned world model.
+
+    Args:
+        model: ContextDynamicsModel instance.
+        encoder_lr: Learning rate for conditioned encoder.
+        context_lr: Learning rate for context encoder.
+        dict_lr: Learning rate for dictionary (0 = frozen).
+        sparsity_lambda: L1 sparsity weight.
+    """
+
+    def __init__(
+        self,
+        model: ContextDynamicsModel,
+        encoder_lr: float = 1e-3,
+        context_lr: float = 1e-3,
+        dict_lr: float = 1e-5,
+        sparsity_lambda: float = 0.1,
+    ) -> None:
+        self.model = model
+        self.sparsity_lambda = sparsity_lambda
+
+        param_groups = [
+            {"params": model.encoder.parameters(), "lr": encoder_lr},
+            {"params": model.context_encoder.parameters(), "lr": context_lr},
+        ]
+        if dict_lr > 0 and isinstance(model.dictionary, torch.nn.Parameter):
+            param_groups.append({"params": [model.dictionary], "lr": dict_lr})
+
+        self.optimizer = torch.optim.Adam(param_groups)
+
+    def train_step(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        next_states: torch.Tensor,
+        context: torch.Tensor,
+        sample_weights: torch.Tensor | None = None,
+    ) -> dict[str, float]:
+        """Single training step with context vector.
+
+        Args:
+            context: Pre-computed context vector z, shape (batch, context_dim).
+            sample_weights: Per-sample importance weights.
+
+        Returns:
+            Dict of training metrics.
+        """
+        self.model.train()
+        loss, metrics = self.model.compute_loss(
+            states,
+            actions,
+            next_states,
+            context,
+            self.sparsity_lambda,
+            sample_weights,
+        )
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.model.normalize_atoms()
+
         return metrics

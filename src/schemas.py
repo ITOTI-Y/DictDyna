@@ -32,6 +32,19 @@ class SparseEncoderSchema(BaseModel):
     )
 
 
+class ContextEncoderSchema(BaseModel):
+    """Context encoder configuration for context-conditioned world model."""
+
+    model_config = ConfigDict(frozen=True)
+
+    context_dim: int = Field(16, ge=4, le=64, description="Context vector dimension")
+    context_window: int = Field(
+        10, ge=1, le=50, description="Number of recent transitions for context"
+    )
+    hidden_dims: list[int] = Field(default=[128, 128])
+    context_lr: float = Field(1e-3, gt=0, description="Context encoder learning rate")
+
+
 class DynaSchema(BaseModel):
     """Dyna-style planning configuration."""
 
@@ -107,6 +120,7 @@ class TrainSchema(BaseModel):
 
     dictionary: DictionarySchema = DictionarySchema()
     encoder: SparseEncoderSchema = SparseEncoderSchema()
+    context: ContextEncoderSchema = ContextEncoderSchema()
     dyna: DynaSchema = DynaSchema()
     sac: SACSchema = SACSchema()
     reward: RewardSchema = RewardSchema()

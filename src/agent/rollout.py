@@ -42,13 +42,16 @@ class ModelRollout:
         start_states: np.ndarray,
         building_id: str = "0",
         horizon: int = 3,
+        context: torch.Tensor | None = None,
     ) -> dict[str, np.ndarray]:
         """Generate simulated rollouts from start states.
 
         Args:
             start_states: Starting states, shape (M, d).
-            building_id: Building to simulate.
+            building_id: Building to simulate (adapter mode).
             horizon: Number of rollout steps H.
+            context: Context vector z (context mode). If provided, uses
+                context-conditioned forward instead of building_id routing.
 
         Returns:
             Dict with keys: states, actions, rewards, next_states, dones.
@@ -67,12 +70,21 @@ class ModelRollout:
             start_states, dtype=torch.float32, device=self.device
         )
 
+        # Expand context to match batch size if provided
+        if context is not None and context.shape[0] == 1:
+            context = context.expand(len(start_states), -1)
+
         for _ in range(horizon):
             # Select actions using policy
             actions, _ = self.actor(current_states)
 
             # Predict next states using world model (get alpha for exploration)
-            next_states, alpha = self.world_model(current_states, actions, building_id)
+            if context is not None:
+                next_states, alpha = self.world_model(current_states, actions, context)
+            else:
+                next_states, alpha = self.world_model(
+                    current_states, actions, building_id
+                )
 
             # Estimate rewards from predicted states + exploration bonus
             rewards = self.reward_estimator.estimate(next_states)

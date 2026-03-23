@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+from collections import deque
 from pathlib import Path
 
 import gymnasium
@@ -15,7 +16,7 @@ from src.agent.rollout import ModelRollout
 from src.schemas import TrainSchema
 from src.utils import get_device, seed_everything, sinergym_workdir
 from src.world_model.dict_dynamics import DictDynamicsModel
-from src.world_model.model_trainer import WorldModelTrainer
+from src.world_model.model_trainer import ContextWorldModelTrainer, WorldModelTrainer
 
 with contextlib.suppress(ImportError):
     import sinergym  # noqa: F401
@@ -46,6 +47,7 @@ class MultiBuildingDynaSAC:
         seed: int = 42,
         save_dir: str = "output/results/multi_dyna",
         independent_dict: bool = False,
+        context_mode: bool = False,
     ) -> None:
         self.building_configs = building_configs
         self.n_buildings = len(building_configs)
@@ -55,6 +57,7 @@ class MultiBuildingDynaSAC:
         self.config = config
         self.device = get_device(config.device)
         self.independent_dict = independent_dict
+        self.context_mode = context_mode
 
         seed_everything(seed)
 
@@ -99,8 +102,15 @@ class MultiBuildingDynaSAC:
             obs_std=dict_data["obs_std"],
         )
 
+        # Context-conditioned mode: replace adapter routing with context vector
+        self._context_wm: None = None  # placeholder
+        self._context_wm_trainer: ContextWorldModelTrainer | None = None
+        self._context_windows: dict[str, deque] = {}
+        if context_mode:
+            self._setup_context(dictionary, config, dict_data, state_dim, action_dim)
+
         # Replace world model with shared-private version for shared mode
-        if not independent_dict:
+        if not independent_dict and not context_mode:
             from src.world_model.shared_private_dynamics import SharedPrivateWorldModel
 
             n_shared = dictionary.shape[1]  # 128 pretrained atoms → 64 shared
@@ -210,6 +220,111 @@ class MultiBuildingDynaSAC:
             f"(shared actor/critic)"
         )
 
+    def _setup_context(
+        self,
+        dictionary: torch.Tensor,
+        config: TrainSchema,
+        dict_data: dict,
+        state_dim: int,
+        action_dim: int,
+    ) -> None:
+        """Set up context-conditioned world model."""
+        from src.world_model.context_dynamics import ContextDynamicsModel
+        from src.world_model.context_encoder import (
+            ContextConditionedEncoder,
+            ContextEncoder,
+        )
+
+        ctx_cfg = config.context
+        context_encoder = ContextEncoder(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            context_dim=ctx_cfg.context_dim,
+            hidden_dims=ctx_cfg.hidden_dims,
+        ).to(self.device)
+
+        conditioned_encoder = ContextConditionedEncoder(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            context_dim=ctx_cfg.context_dim,
+            n_atoms=config.dictionary.n_atoms,
+            shared_hidden_dims=config.encoder.shared_hidden_dims,
+            sparsity_method=config.encoder.sparsity_method,
+            topk_k=config.encoder.topk_k,
+        ).to(self.device)
+
+        ctx_model = ContextDynamicsModel(
+            dictionary=dictionary.to(self.device),
+            context_encoder=context_encoder,
+            conditioned_encoder=conditioned_encoder,
+            learnable_dict=config.dictionary.slow_update_lr > 0,
+        ).to(self.device)
+
+        # Replace DynaSAC's world model and trainer
+        self.dyna.world_model = ctx_model
+        self._context_wm_trainer = ContextWorldModelTrainer(
+            model=ctx_model,
+            encoder_lr=config.dictionary.pretrain_lr,
+            context_lr=ctx_cfg.context_lr,
+            dict_lr=config.dictionary.slow_update_lr,
+            sparsity_lambda=config.dictionary.sparsity_lambda,
+        )
+        self.dyna.rollout_gen = ModelRollout(
+            world_model=ctx_model,  # type: ignore[arg-type]
+            actor=self.dyna.actor,
+            reward_estimator=self.dyna.reward_estimator,
+            exploration=self.dyna.exploration,
+            device=self.device,
+        )
+
+        # Per-building context windows (ring buffer of recent transitions)
+        for bid in self.building_ids:
+            self._context_windows[bid] = deque(maxlen=ctx_cfg.context_window)
+
+        logger.info(
+            f"Context mode: context_dim={ctx_cfg.context_dim}, "
+            f"window={ctx_cfg.context_window}, n_atoms={config.dictionary.n_atoms}"
+        )
+
+    def _get_building_context(self, bid: str) -> torch.Tensor:
+        """Get context vector for a building from its transition window.
+
+        Returns:
+            Context tensor, shape (1, context_dim).
+        """
+        window = self._context_windows[bid]
+        ctx_cfg = self.config.context
+
+        if len(window) == 0:
+            # Zero context when no history available yet
+            return torch.zeros(1, ctx_cfg.context_dim, device=self.device)
+
+        # Stack transitions: each is (s, a, delta_s) flattened
+        transitions = torch.stack(list(window)).unsqueeze(0).to(self.device)
+        # Pad if less than context_window
+        if transitions.shape[1] < ctx_cfg.context_window:
+            pad = torch.zeros(
+                1,
+                ctx_cfg.context_window - transitions.shape[1],
+                transitions.shape[2],
+                device=self.device,
+            )
+            transitions = torch.cat([pad, transitions], dim=1)
+
+        with torch.no_grad():
+            return self.dyna.world_model.infer_context(transitions)  # type: ignore[union-attr]
+
+    def _update_context_window(
+        self, bid: str, obs: np.ndarray, action: np.ndarray, next_obs: np.ndarray
+    ) -> None:
+        """Append a transition (s, a, Δs) to building's context window."""
+        delta = next_obs - obs
+        transition = torch.tensor(
+            np.concatenate([obs, action, delta]),
+            dtype=torch.float32,
+        )
+        self._context_windows[bid].append(transition)
+
     def _get_env(self, bid_idx: int) -> gymnasium.Env:
         """Get env for building, creating if needed (single instance only)."""
         bid = self.building_ids[bid_idx]
@@ -288,6 +403,10 @@ class MultiBuildingDynaSAC:
                         obs, action, float(reward), next_obs, done, tag=bid_idx
                     )
 
+                    # Update context window for this building
+                    if self.context_mode:
+                        self._update_context_window(bid, obs, action, next_obs)
+
                     # Train
                     if global_step >= learning_starts:
                         self._train_step(
@@ -348,6 +467,11 @@ class MultiBuildingDynaSAC:
         if self.real_buffer.tag_count(bid_idx) < batch_size:
             return
 
+        # Context mode: use context vector instead of adapter routing
+        if self.context_mode:
+            self._train_step_context(bid, bid_idx, global_step)
+            return
+
         # Select world model components (shared or independent)
         if self.independent_dict and bid in self._per_building_wm:
             wm_trainer = self._per_building_trainer[bid]
@@ -392,6 +516,92 @@ class MultiBuildingDynaSAC:
             )
 
         # 3. SAC update (real from ALL buildings + model from THIS)
+        real_batch = self.real_buffer.sample(batch_size, self.device)
+        model_ratio = self.config.dyna.model_to_real_ratio
+        n_model = int(batch_size * model_ratio)
+
+        if n_model > 0 and len(self.model_buffers[bid]) >= n_model:
+            model_batch = self.model_buffers[bid].sample(n_model, self.device)
+            n_real = batch_size - n_model
+            mixed = {
+                k: torch.cat([real_batch[k][:n_real], model_batch[k]], dim=0)
+                for k in real_batch
+            }
+        else:
+            mixed = real_batch
+
+        self.dyna.sac_trainer.update(
+            mixed["states"],
+            mixed["actions"],
+            mixed["rewards"],
+            mixed["next_states"],
+            mixed["dones"],
+        )
+
+    def _train_step_context(
+        self,
+        bid: str,
+        bid_idx: int,
+        global_step: int,
+    ) -> None:
+        """Training step for context-conditioned world model."""
+        assert self._context_wm_trainer is not None
+        batch_size = self.config.batch_size
+
+        # 1. Update world model with context (train on ALL buildings)
+        if global_step % self.config.dyna.model_update_freq == 0:
+            per_bld = max(batch_size // self.n_buildings, 32)
+            for other_idx, other_bid in enumerate(self.building_ids):
+                if self.real_buffer.tag_count(other_idx) < per_bld:
+                    continue
+                batch = self.real_buffer.sample_tagged(per_bld, other_idx, self.device)
+                context = self._get_building_context(other_bid)
+                context_expanded = context.expand(per_bld, -1)
+
+                # TD-error weights
+                with torch.no_grad():
+                    next_actions, _ = self.dyna.actor(batch["next_states"])
+                    q1_next, q2_next = self.dyna.critic_target(
+                        batch["next_states"], next_actions
+                    )
+                    q_next = torch.min(q1_next, q2_next)
+                    target_q = (
+                        batch["rewards"]
+                        + (1.0 - batch["dones"]) * self.config.gamma * q_next
+                    )
+                    q1, q2 = self.dyna.critic(batch["states"], batch["actions"])
+                    td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
+                    weights = 1.0 + td_error / (td_error.mean() + 1e-8)
+
+                self._context_wm_trainer.train_step(
+                    batch["states"],
+                    batch["actions"],
+                    batch["next_states"],
+                    context_expanded,
+                    weights,
+                )
+
+        # 2. Model rollouts with context
+        if global_step >= self.config.dyna.rollout_start_step:
+            n_rollouts = self.config.dyna.rollouts_per_step
+            horizon = self.config.dyna.rollout_horizon
+            start_batch = self.real_buffer.sample_tagged(
+                n_rollouts, bid_idx, self.device
+            )
+            start_states = start_batch["states"].cpu().numpy()
+            context = self._get_building_context(bid)
+            rollout_data = self.dyna.rollout_gen.generate(
+                start_states, horizon=horizon, context=context
+            )
+            self.model_buffers[bid].add_batch(
+                rollout_data["states"],
+                rollout_data["actions"],
+                rollout_data["rewards"],
+                rollout_data["next_states"],
+                rollout_data["dones"],
+            )
+
+        # 3. SAC update (same as adapter mode)
         real_batch = self.real_buffer.sample(batch_size, self.device)
         model_ratio = self.config.dyna.model_to_real_ratio
         n_model = int(batch_size * model_ratio)
