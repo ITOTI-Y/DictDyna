@@ -152,7 +152,7 @@ class SharedPrivateEncoder(nn.Module):
         self, building_id: str, adapter_dim: int = 64, n_private: int = 64
     ) -> None:
         """Add adapter for a new building."""
-        in_dim = self.trunk[-2].out_features  # ty: ignore[union-attr]
+        in_dim: int = self.trunk[-2].out_features  # type: ignore[assignment]
         self.adapters[building_id] = nn.Sequential(
             nn.Linear(in_dim, adapter_dim),
             nn.ReLU(),

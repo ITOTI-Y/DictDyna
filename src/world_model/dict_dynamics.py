@@ -47,24 +47,25 @@ class DictDynamicsModel(nn.Module):
         # Space conversion buffers (None = raw mode, no conversion)
         self._has_conversion = diff_std is not None and obs_std is not None
         if self._has_conversion:
+            assert diff_std is not None and obs_std is not None
             # scale converts diff-norm space to obs-norm space: diff_std / obs_std
-            scale = diff_std / obs_std  # ty: ignore[unsupported-operator]
+            scale = diff_std / obs_std
             self.register_buffer("_scale", scale)
             # bias accounts for diff_mean in obs-norm space: diff_mean / obs_std
             bias = (
                 diff_mean / obs_std
                 if diff_mean is not None
                 else torch.zeros_like(scale)
-            )  # ty: ignore[unsupported-operator]
+            )
             self.register_buffer("_bias", bias)
 
     @property
     def n_atoms(self) -> int:
-        return self.dictionary.shape[1]  # ty: ignore[not-subscriptable]
+        return self.dictionary.shape[1]
 
     @property
     def state_dim(self) -> int:
-        return self.dictionary.shape[0]  # ty: ignore[not-subscriptable]
+        return self.dictionary.shape[0]
 
     def forward(
         self,
@@ -88,12 +89,10 @@ class DictDynamicsModel(nn.Module):
             (predicted_next_state, alpha)
         """
         alpha = self.encoder(state, action, building_id)
-        delta = alpha @ self.dictionary.T  # ty: ignore[unsupported-operator]
-
+        delta = alpha @ self.dictionary.T
         if self._has_conversion:
             # Convert from diff-norm to obs-norm space
-            delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
-
+            delta = delta * self._scale + self._bias
         next_state = state + delta
         return next_state, alpha
 
@@ -112,7 +111,7 @@ class DictDynamicsModel(nn.Module):
         with torch.no_grad():
             norms = torch.norm(self.dictionary, dim=0, keepdim=True)
             norms = torch.clamp(norms, min=1e-10)
-            self.dictionary.div_(norms)  # ty: ignore[unresolved-attribute]
+            self.dictionary.div_(norms)
 
     def compute_loss(
         self,

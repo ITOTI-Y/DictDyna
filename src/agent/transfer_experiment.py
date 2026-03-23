@@ -157,7 +157,7 @@ class FewShotTransferExperiment:
             while not done:
                 global_step += 1
                 if global_step < 500:
-                    action = env.action_space.sample()  # ty: ignore[unresolved-attribute]
+                    action = env.action_space.sample()
                 else:
                     action = dyna.select_action(obs)
 
@@ -197,7 +197,7 @@ class FewShotTransferExperiment:
         states, actions, next_states, rewards_list = [], [], [], []
         done = False
         while not done:
-            action = env.action_space.sample()  # ty: ignore[unresolved-attribute]
+            action = env.action_space.sample()
             raw_next, reward, term, trunc, _ = env.step(action)
             done = term or trunc
             states.append(self._normalize(raw_obs))

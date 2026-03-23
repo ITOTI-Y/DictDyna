@@ -13,6 +13,9 @@ class ObsNormLayer(nn.Module):
     Normalizes input: (x - mean) / std, clamped to [-clip, clip].
     """
 
+    mean: torch.Tensor
+    std: torch.Tensor
+
     def __init__(
         self,
         obs_mean: np.ndarray | torch.Tensor,
@@ -28,7 +31,7 @@ class ObsNormLayer(nn.Module):
         return torch.clamp(
             (x - self.mean) / self.std,
             -self.clip,
-            self.clip,  # ty: ignore[unsupported-operator]
+            self.clip,
         )
 
 

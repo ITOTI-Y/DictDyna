@@ -224,7 +224,8 @@ class MultiBuildingDynaSAC:
                 self._current_env = gymnasium.make(cfg["env_name"])
             self._current_bid = bid
             logger.info(f"Switched to building: {bid}")
-        return self._current_env  # ty: ignore[return-value]
+        assert self._current_env is not None
+        return self._current_env
 
     def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:
         return np.clip((raw_obs - self._obs_mean) / self._obs_std, -10.0, 10.0).astype(
@@ -273,7 +274,7 @@ class MultiBuildingDynaSAC:
 
                     # Select action
                     if global_step < learning_starts:
-                        action = env.action_space.sample()  # ty: ignore[unresolved-attribute]
+                        action = env.action_space.sample()
                     else:
                         action = self.dyna.select_action(obs)
 
