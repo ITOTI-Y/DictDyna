@@ -96,9 +96,15 @@ def pretrain(
     method: Annotated[
         str, typer.Option(help="Dictionary learning method: ksvd or online")
     ] = "ksvd",
+    buildings: Annotated[
+        list[str] | None,
+        typer.Option("--buildings", "-b", help="Only use these building IDs"),
+    ] = None,
 ) -> None:
     """Phase I: Pretrain dictionary on offline state diffs."""
     cfg = _load_config(config, override)
+    if buildings:
+        logger.info(f"Source-only pretraining: buildings={buildings}")
     logger.info("Starting dictionary pretraining")
 
     from src.dictionary.pretrain import pretrain_dictionary
@@ -113,6 +119,7 @@ def pretrain(
         method=method,
         max_iter=dict_cfg.get("pretrain_epochs", 100),
         output_path=output_cfg.get("dict_path", "output/pretrained/dict.pt"),
+        buildings=buildings,
     )
     logger.info("Dictionary pretraining complete")
 
