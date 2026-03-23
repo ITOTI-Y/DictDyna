@@ -298,7 +298,7 @@ class FewShotTransferExperiment:
 
         # SAC updates using real target data + model rollouts
         batch_size = min(64, n_adapt_steps)
-        n_sac_updates = max(200, 200 * n_adapt_steps // 96)  # scale with data
+        n_sac_updates = max(200, int(200 * (n_adapt_steps / 96) ** 0.5))  # sqrt scale
         for step in range(n_sac_updates):
             # Generate rollouts from adapted WM
             if n_adapt_steps >= batch_size and step >= 50:
@@ -374,7 +374,7 @@ class FewShotTransferExperiment:
 
         # SAC updates with rollouts (SAME as transfer for fairness)
         batch_size = min(64, n_steps)
-        n_sac_updates = max(200, 200 * n_steps // 96)  # scale with data
+        n_sac_updates = max(200, int(200 * (n_steps / 96) ** 0.5))  # sqrt scale
         for step in range(n_sac_updates):
             # Generate rollouts (same as transfer)
             if n_steps >= batch_size and step >= 50:
