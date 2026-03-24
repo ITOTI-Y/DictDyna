@@ -144,10 +144,13 @@ def train(
     wandb_enabled: Annotated[
         bool, typer.Option("--wandb/--no-wandb", help="Enable W&B logging")
     ] = False,
+    tag: Annotated[
+        str, typer.Option(help="Experiment tag for save_dir naming")
+    ] = "default",
 ) -> None:
     """Phase II: Train Dyna-SAC with dictionary world model."""
     cfg = _load_config(config, override)
-    logger.info(f"Starting Dyna-SAC training (seed={seed})")
+    logger.info(f"Starting Dyna-SAC training (seed={seed}, tag={tag})")
 
     from src.agent.dyna_trainer import DynaSACTrainer
     from src.schemas import TrainSchema
@@ -170,7 +173,7 @@ def train(
         dict_path=dict_path,
         config=train_cfg,
         seed=seed,
-        save_dir=f"output/results/dyna_sac/{env_name}_s{seed}",
+        save_dir=f"output/results/dyna_sac/{tag}_s{seed}",
         wandb_project=wandb_project,
     )
     result = trainer.train()
@@ -255,6 +258,7 @@ def transfer(
     context: Annotated[
         bool, typer.Option("--context", help="Use context-conditioned transfer")
     ] = False,
+    tag: Annotated[str, typer.Option(help="Experiment tag for save_dir naming")] = "",
 ) -> None:
     """Phase IV: Few-shot transfer to new building (1/3/7 days)."""
     cfg = _load_config(config, override)
@@ -288,7 +292,7 @@ def transfer(
         config=train_cfg,
         adaptation_days=[1, 3, 7],
         seed=seed,
-        save_dir=f"output/results/transfer/s{seed}",
+        save_dir=f"output/results/transfer/{tag + '_' if tag else ''}s{seed}",
         context_mode=context,
     )
     results = experiment.run()
