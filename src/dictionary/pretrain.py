@@ -11,7 +11,9 @@ from src.dictionary.online_dl import OnlineDictionaryLearner
 
 
 def load_state_diffs(
-    data_dir: str | Path, buildings: list[str] | None = None
+    data_dir: str | Path,
+    buildings: list[str] | None = None,
+    train_ratio: float = 1.0,
 ) -> np.ndarray:
     """Load and concatenate state diff files from a directory.
 
@@ -19,6 +21,7 @@ def load_state_diffs(
         data_dir: Directory containing *_state_diffs.npy files.
         buildings: If provided, only load files matching these building IDs
                    (e.g. ["office_hot", "office_mixed"]).
+        train_ratio: Fraction of each file's data to use (temporal split).
     """
     data_dir = Path(data_dir)
     all_diffs = []
@@ -27,6 +30,9 @@ def load_state_diffs(
             logger.info(f"Skipping {f.name} (not in source buildings)")
             continue
         diffs = np.load(f)
+        if train_ratio < 1.0:
+            n_train = int(len(diffs) * train_ratio)
+            diffs = diffs[:n_train]
         logger.info(f"Loaded {f.name}: {diffs.shape}")
         all_diffs.append(diffs)
     if not all_diffs:
@@ -38,8 +44,14 @@ def compute_obs_stats(
     transitions_dir: str | Path,
     state_dim: int,
     buildings: list[str] | None = None,
+    train_ratio: float = 0.8,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute observation mean/std from raw transitions."""
+    """Compute observation mean/std from raw transitions (train split only).
+
+    Args:
+        train_ratio: Fraction of each building's data to use (temporal split).
+                     Prevents test data distribution from leaking into normalization.
+    """
     transitions_dir = Path(transitions_dir)
     all_states = []
     for f in sorted(transitions_dir.glob("*_transitions.npz")):
@@ -48,7 +60,9 @@ def compute_obs_stats(
             continue
         t = np.load(f)
         if "states" in t and t["states"].shape[1] == state_dim:
-            all_states.append(t["states"])
+            states = t["states"]
+            n_train = int(len(states) * train_ratio)
+            all_states.append(states[:n_train])
     if not all_states:
         logger.warning("No transitions found, using zero mean / unit std")
         return np.zeros(state_dim), np.ones(state_dim)
@@ -56,7 +70,8 @@ def compute_obs_stats(
     obs_mean = states_all.mean(axis=0)
     obs_std = np.maximum(states_all.std(axis=0), 1e-8)
     logger.info(
-        f"Computed obs stats from {len(all_states)} buildings, {len(states_all)} samples"
+        f"Computed obs stats from {len(all_states)} buildings, "
+        f"{len(states_all)} samples (train_ratio={train_ratio})"
     )
     return obs_mean, obs_std
 
@@ -70,6 +85,7 @@ def pretrain_dictionary(
     output_path: str | Path = "output/pretrained/dict.pt",
     transitions_dir: str | Path = "data/offline_rollouts",
     buildings: list[str] | None = None,
+    train_ratio: float = 0.8,
 ) -> torch.Tensor:
     """Run the full pretraining pipeline.
 
@@ -80,13 +96,13 @@ def pretrain_dictionary(
     if buildings:
         logger.info(f"Source-only pretraining: buildings={buildings}")
     logger.info(f"Loading state diffs from {data_dir}")
-    raw_diffs = load_state_diffs(data_dir, buildings=buildings)
+    raw_diffs = load_state_diffs(data_dir, buildings=buildings, train_ratio=train_ratio)
     state_dim = raw_diffs.shape[1]
-    logger.info(f"Total data: {raw_diffs.shape}")
+    logger.info(f"Total data: {raw_diffs.shape} (train_ratio={train_ratio})")
 
-    # Compute obs stats from raw transitions
+    # Compute obs stats from raw transitions (train split only)
     obs_mean, obs_std = compute_obs_stats(
-        transitions_dir, state_dim, buildings=buildings
+        transitions_dir, state_dim, buildings=buildings, train_ratio=train_ratio
     )
 
     # Normalize diffs into obs-normalized space: Δs / obs_std

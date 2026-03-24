@@ -88,17 +88,34 @@ def train_world_model(
         sparsity_lambda=sparsity_lambda,
     )
 
-    # Normalize states using dict pretraining stats
-    def normalize(x):
-        return (x - norm_mean) / np.maximum(norm_std, 1e-8)
-
     # Split data: 80% train, 20% test
+    # Compute normalization stats from TRAIN split only (avoid test data leakage)
     train_data_by_bid: dict[str, dict[str, torch.Tensor]] = {}
     test_data_by_bid: dict[str, dict[str, torch.Tensor]] = {}
+
+    all_train_states = []
+    splits: dict[str, int] = {}
     for bid in building_ids:
         d = all_data[bid]
         n = len(d["states"])
         split = int(0.8 * n)
+        splits[bid] = split
+        all_train_states.append(d["states"][:split])
+
+    # Normalization stats from train data only
+    train_states_cat = np.concatenate(all_train_states, axis=0)
+    norm_mean = train_states_cat.mean(axis=0)
+    norm_std = np.maximum(train_states_cat.std(axis=0), 1e-8)
+    logger.info(
+        f"Normalization stats from train split: {len(train_states_cat)} samples"
+    )
+
+    def normalize(x):
+        return (x - norm_mean) / norm_std
+
+    for bid in building_ids:
+        d = all_data[bid]
+        split = splits[bid]
         train_data_by_bid[bid] = {
             "states": torch.tensor(
                 normalize(d["states"][:split]), dtype=torch.float32, device=dev

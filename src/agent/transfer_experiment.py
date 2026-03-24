@@ -201,12 +201,15 @@ class FewShotTransferExperiment:
             env = gymnasium.make(env_name)
         raw_obs, _ = env.reset(seed=self.seed + 100)
 
+        raw_states, raw_next_states = [], []
         states, actions, next_states, rewards_list = [], [], [], []
         done = False
         while not done:
             action = env.action_space.sample()
             raw_next, reward, term, trunc, _ = env.step(action)
             done = term or trunc
+            raw_states.append(raw_obs.copy())
+            raw_next_states.append(raw_next.copy())
             states.append(self._normalize(raw_obs))
             actions.append(action)
             next_states.append(self._normalize(raw_next))
@@ -221,6 +224,8 @@ class FewShotTransferExperiment:
             "actions": np.array(actions, dtype=np.float32),
             "next_states": np.array(next_states, dtype=np.float32),
             "rewards": np.array(rewards_list, dtype=np.float32),
+            "raw_states": np.array(raw_states, dtype=np.float32),
+            "raw_next_states": np.array(raw_next_states, dtype=np.float32),
         }
 
     def _run_transfer(
@@ -478,6 +483,15 @@ class FewShotTransferExperiment:
 
     def _run_from_scratch(self, target_data: dict, n_steps: int) -> float:
         """Train from scratch with only n_steps of target data."""
+        # Compute obs stats from target data itself (no source leakage)
+        target_obs_mean = torch.tensor(
+            target_data["raw_states"].mean(axis=0), dtype=torch.float32
+        )
+        target_obs_std = torch.tensor(
+            np.maximum(target_data["raw_states"].std(axis=0), 1e-8),
+            dtype=torch.float32,
+        )
+
         # Fresh Dyna-SAC with random dictionary + random encoder (true scratch)
         random_dict = torch.randn_like(self.dictionary)
         random_dict = random_dict / random_dict.norm(dim=0, keepdim=True)
@@ -489,8 +503,8 @@ class FewShotTransferExperiment:
             config=self.config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
-            obs_mean=self._obs_mean_t,
-            obs_std=self._obs_std_t,
+            obs_mean=target_obs_mean,
+            obs_std=target_obs_std,
         )
 
         # Train world model on uniformly sampled data (same as transfer)
