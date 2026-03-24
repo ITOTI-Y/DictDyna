@@ -316,27 +316,25 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - Few-shot（数据 >= 50 步时）：在 target 数据上微调 context encoder 20 epochs
 - 无需 adapter 管理、无需 warm-start、无需 freeze/unfreeze
 
-**结果（3 Seed: 42/123/7, Context Mode, Source-Only Dict）**：
+**结果（3 Seed: 42/123/7, Context Mode, Source-Only Dict, train_ratio=0.8, 零泄露）**：
 
 | 数据量 | Transfer (mean±std) | Scratch (mean±std) | 优势 (mean±std) |
 |--------|--------------------|--------------------|-----------------|
-| 1 天 | **-8571±1358** | -17938±1471 | **+52.5±3.4%** |
-| 3 天 | **-7314±906** | -18411±828 | **+60.2±5.1%** |
-| 7 天 | **-9427±574** | -15603±1102 | **+39.5±0.8%** |
+| 1 天 | **-8134±636** | -20460±1882 | **+59.9±5.1%** |
+| 3 天 | **-8542±1080** | -19796±1149 | **+56.6±6.3%** |
+| 7 天 | **-9516±972** | -15809±1841 | **+39.7±0.8%** |
 
-**Context vs Adapter 对比**：
-
-| 数据量 | Adapter 模式 | Context 模式 | 变化 |
-|--------|-------------|-------------|------|
-| 1 天 | +56.9±5.4% | +52.5±3.4% | 略低但更稳定 |
-| 3 天 | +30.3±2.3% | **+60.2±5.1%** | **+30pp 大幅提升** |
-| 7 天 | +29.6±11.6% | **+39.5±0.8%** | **+10pp，std 从 11.6% 降至 0.8%** |
+**零泄露保障**：
+- 字典仅用 source（hot+mixed）前 80% 时间段数据预训练
+- obs_mean/obs_std 仅从 source 前 80% 计算
+- scratch baseline 使用 target 建筑自身的 obs_mean/obs_std
 
 **结论**：
-- Context 模式在 3d/7d 优势远超 adapter，且结果极其稳定（7d std=0.8%）
-- 3d Transfer reward (-7314) 已接近 SAC baseline (-5575)，仅用 3 天数据
+- **1d +59.9%**：仅 1 天数据即可获得近 60% 优势
+- **7d std=0.8%**：结果极其稳定
+- **所有 9 个 seed×day 组合 Transfer 全部赢 Scratch**（min=+39.1%, max=+66.9%）
 - 架构大幅简化：消除 ModuleDict、building_id 路由、adapter 管理
-- 论文叙事升级：「连续建筑热指纹 z 替代离散 adapter，实现 zero-shot 迁移」
+- 论文叙事：「连续建筑热指纹 z 替代离散 adapter，实现 zero-shot 迁移，无任何数据泄露」
 
 ---
 
@@ -372,12 +370,12 @@ Applied Energy（首选）/ AAAI 2027（备选）
 | office_cool | **-5218** | -5299 | +81 | Shared |
 | MEAN | -5499 | **-5345** | -154 | Indep |
 
-### Phase 4 Transfer 最终对比（Source-Only Dict，3 Seeds）
+### Phase 4 Transfer 最终对比（Source-Only Dict，3 Seeds，零泄露）
 
 | 方法 | 1d 优势 | 3d 优势 | 7d 优势 | 架构 |
 |------|---------|---------|---------|------|
 | Adapter (fine-tune 50ep) | +56.9±5.4% | +30.3±2.3% | +29.6±11.6% | ModuleDict + building_id |
-| **Context (zero-shot/few-shot)** | **+52.5±3.4%** | **+60.2±5.1%** | **+39.5±0.8%** | **ContextEncoder + z∈R^16** |
+| **Context (零泄露)** | **+59.9±5.1%** | **+56.6±6.3%** | **+39.7±0.8%** | **ContextEncoder + z∈R^16** |
 
 ---
 
@@ -481,7 +479,7 @@ World Model: obs_norm + D·α = obs'_norm        Reward Estimator: denorm(obs'_n
 | Phase 1 | 单建筑 World Model | ✅ 完成 |
 | Phase 2 | 单建筑 MBRL (Dyna-SAC) | ✅ 完成 |
 | Phase 3 | 多建筑共享字典 | ✅ Ep1 +5.2%（sample efficiency），总体 +1.7% |
-| Phase 4 | Few-shot transfer | ✅ Context mode: **+40~60%** vs scratch，超越 adapter 模式 |
+| Phase 4 | Few-shot transfer | ✅ Context mode (零泄露): **+40~60%** vs scratch |
 | Phase 5 | 消融实验 + 论文写作 | 待开始 |
 
 ---
