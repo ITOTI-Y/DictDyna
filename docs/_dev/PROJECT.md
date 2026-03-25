@@ -486,6 +486,20 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - dim=32 无额外收益，可能过参数化
 - **推荐 dim=16**（论文默认值），在 3d 场景最优且更稳定
 
+#### D 组：Context Multi-Train（3 建筑 × 3 episodes，seed=42）
+
+| Building | Context Ep1 | Context Ep3 | Shared-Private Ep1 | Shared-Private Ep3 |
+|----------|-----------|-----------|-------------------|-------------------|
+| hot | -7251 | -5689 | **-6941** | **-5313** |
+| mixed | -6857 | -6263 | **-6977** | **-5966** |
+| cool | **-6330** | -5430 | -6957 | **-5218** |
+| **MEAN** | **-6813** | -5794 | -6958 | **-5499** |
+
+**发现**：
+- Context 模式在 **cool Ep1 最优**（-6330 vs Shared -6957，+9.0%），context encoder 能快速适应新气候
+- Ep3 整体略差于 Shared-Private（-5794 vs -5499），充分训练后 per-building adapter 更专注
+- Context 模式优势在 **低数据/迁移场景**，非充分训练场景
+
 ---
 
 ## 技术栈
