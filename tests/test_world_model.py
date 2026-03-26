@@ -12,7 +12,11 @@ N_ATOMS = 32
 BATCH_SIZE = 16
 
 
-def _make_model(n_buildings: int = 2, sparsity_method: str = "l1_penalty"):
+def _make_model(
+    n_buildings: int = 2,
+    sparsity_method: str = "l1_penalty",
+    dim_weights: torch.Tensor | None = None,
+):
     encoder = SparseEncoder(
         state_dim=STATE_DIM,
         action_dim=ACTION_DIM,
@@ -25,7 +29,9 @@ def _make_model(n_buildings: int = 2, sparsity_method: str = "l1_penalty"):
     dictionary = torch.randn(STATE_DIM, N_ATOMS)
     # Normalize columns
     dictionary = dictionary / dictionary.norm(dim=0, keepdim=True)
-    model = DictDynamicsModel(dictionary, encoder, learnable_dict=True)
+    model = DictDynamicsModel(
+        dictionary, encoder, learnable_dict=True, dim_weights=dim_weights
+    )
     return model
 
 
@@ -111,6 +117,66 @@ class TestDictDynamicsModel:
         a = torch.randn(BATCH_SIZE, ACTION_DIM)
         pred = model.predict(s, a, building_id="0")
         assert pred.shape == (BATCH_SIZE, STATE_DIM)
+
+
+class TestDimWeightedLoss:
+    def test_dim_weights_amplify_reward_dims(self):
+        """Verify that reward-critical dims get higher loss contribution."""
+        weights = torch.ones(STATE_DIM)
+        weights[0] = 10.0  # simulate reward-critical dim
+        model_w = _make_model(dim_weights=weights)
+        model_u = _make_model()
+        # Copy parameters so only dim_weights differs
+        model_u.load_state_dict(model_w.state_dict(), strict=False)
+
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+
+        loss_weighted, _ = model_w.compute_loss(s, a, ns)
+        loss_uniform, _ = model_u.compute_loss(s, a, ns)
+
+        assert loss_weighted > loss_uniform
+
+    def test_dim_weights_none_is_uniform(self):
+        """dim_weights=None should be equivalent to all-ones."""
+        model_none = _make_model()
+        model_ones = _make_model(dim_weights=torch.ones(STATE_DIM))
+        model_ones.load_state_dict(model_none.state_dict(), strict=False)
+
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+
+        loss1, _ = model_none.compute_loss(s, a, ns)
+        loss2, _ = model_ones.compute_loss(s, a, ns)
+
+        torch.testing.assert_close(loss1, loss2)
+
+    def test_reward_dim_metrics_reported(self):
+        """Metrics should include per-group MSE when dim_weights active."""
+        weights = torch.ones(STATE_DIM)
+        weights[0] = 5.0
+        model = _make_model(dim_weights=weights)
+
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+        _, metrics = model.compute_loss(s, a, ns)
+
+        assert "mse_reward_dims" in metrics
+        assert "mse_other_dims" in metrics
+
+    def test_no_metrics_without_dim_weights(self):
+        """No per-group MSE metrics when dim_weights is None."""
+        model = _make_model()
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+        _, metrics = model.compute_loss(s, a, ns)
+
+        assert "mse_reward_dims" not in metrics
+        assert "mse_other_dims" not in metrics
 
 
 class TestSinergymRewardEstimator:

@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from loguru import logger
 
-from src.utils import get_device
+from src.utils import build_dim_weights, get_device
 from src.world_model.dict_dynamics import DictDynamicsModel
 from src.world_model.model_trainer import WorldModelTrainer
 from src.world_model.sparse_encoder import SparseEncoder
@@ -75,10 +75,12 @@ def train_world_model(
         topk_k=topk_k,
     ).to(dev)
 
+    dim_weights = build_dim_weights(state_dim, [9, 15], 5.0, dev)
     model = DictDynamicsModel(
         dictionary=dictionary,
         sparse_encoder=encoder,
         learnable_dict=dict_lr > 0,
+        dim_weights=dim_weights,
     ).to(dev)
 
     trainer = WorldModelTrainer(

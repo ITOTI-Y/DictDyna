@@ -394,7 +394,12 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - 多建筑 shared mode 每步从所有建筑数据训练 WM
 - 防止顺序训练导致的灾难性遗忘
 
-### 创新 4：Context-Conditioned World Model
+### 创新 4：Dimension-weighted WM Loss
+- WM loss 对 reward-critical 维度（indoor_temp, hvac_power）赋予 20x 权重
+- 与 TD-error 加权正交：sample-level + dimension-level 双重聚焦
+- Ep3 +4.1%，方差降低 63%（std 176→64）
+
+### 创新 5：Context-Conditioned World Model
 - 连续 context vector z ∈ R^16 替代离散 adapter 路由（CaDM/DALI 启发）
 - ContextEncoder 从 K=10 条 transition 推断建筑热指纹
 - 消除 ModuleDict、building_id 路由，架构大幅简化
@@ -500,6 +505,32 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - Ep3 整体略差于 Shared-Private（-5794 vs -5499），充分训练后 per-building adapter 更专注
 - Context 模式优势在 **低数据/迁移场景**，非充分训练场景
 
+#### E 组：Dimension-weighted WM Loss 消融（单建筑 hot，2026-03-26）
+
+**动机**：WM loss 对 17 个 obs 维度等权平均 MSE，但 reward 仅依赖 dim 9 (indoor_temp) 和 dim 15 (hvac_power)。引入 per-dimension weight vector w，对 reward-critical 维度赋予更高权重。
+
+**单 seed（seed=42）**：
+
+| 变体 | w | Ep1 | Ep2 | Ep3 | vs Baseline |
+|------|---|-----|-----|-----|-------------|
+| **Baseline (等权)** | 1.0 | -6819 | -5706 | -5150 | — |
+| Dim-weight 5x | 5.0 | -7019 | -5935 | -5727 | -11.2% |
+| Dim-weight 10x | 10.0 | -7254 | -5644 | -5653 | -9.8% |
+| **Dim-weight 20x** | 20.0 | **-6607** | **-5406** | **-5129** | **+0.4%** |
+
+**4-seed 验证（w=1.0 vs w=20.0，seeds=42,0,1,2）**：
+
+| 变体 | s42 | s0 | s1 | s2 | Ep3 Mean±Std | vs Baseline |
+|------|-----|-----|-----|-----|-------------|-------------|
+| **w=1.0 (等权)** | -5150 | -5641 | -5343 | -5339 | -5368±176 | — |
+| **w=20.0** | -5129 | -5202 | -5056 | -5215 | **-5150±64** | **+4.1%** |
+
+**发现**：
+- **w=20.0 一致优于等权 baseline**：Ep3 改善 +4.1%，每个 seed 均优于 w=1.0
+- **训练更稳定**：w=20.0 std=64 vs w=1.0 std=176，方差降低 63%
+- **U 型趋势**：w=5x/10x 反而更差，需足够大的权重才能有效聚焦 reward-critical 维度
+- **与 TD-error 加权正交**：sample-level (创新 2) + dimension-level (本创新) 可叠加
+
 ---
 
 ## 技术栈
@@ -552,7 +583,7 @@ World Model: obs_norm + D·α = obs'_norm        Reward Estimator: denorm(obs'_n
 | Phase 2 | 单建筑 MBRL (Dyna-SAC) | ✅ 完成 |
 | Phase 3 | 多建筑共享字典 | ✅ Ep1 +5.2%（sample efficiency），总体 +1.7% |
 | Phase 4 | Few-shot transfer | ✅ Context mode (零泄露): **+40~60%** vs scratch |
-| Phase 5 | 消融实验 | ✅ 组件消融 + 超参数消融 + context_dim 消融完成 |
+| Phase 5 | 消融实验 | ✅ 组件/超参数/context_dim/dim-weight 消融完成 |
 
 ---
 

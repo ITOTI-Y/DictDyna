@@ -11,7 +11,7 @@ from src.agent.rollout import ModelRollout
 from src.agent.sac import GaussianActor, SACTrainer, SoftQNetwork
 from src.agent.sparse_exploration import SparseCodeExploration
 from src.schemas import TrainSchema
-from src.utils import get_device
+from src.utils import build_dim_weights, get_device
 from src.world_model.dict_dynamics import DictDynamicsModel
 from src.world_model.model_trainer import WorldModelTrainer
 from src.world_model.reward_estimator import SinergymRewardEstimator
@@ -67,10 +67,17 @@ class DynaSAC:
         ).to(self.device)
 
         # Build world model (normalized obs space, no conversion needed)
+        dim_weights = build_dim_weights(
+            state_dim,
+            config.dictionary.reward_dims,
+            config.dictionary.reward_dim_weight,
+            self.device,
+        )
         self.world_model = DictDynamicsModel(
             dictionary=dictionary.to(self.device),
             sparse_encoder=self.encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
+            dim_weights=dim_weights,
         ).to(self.device)
 
         # Build reward estimator (denormalizes predicted states for reward calc)

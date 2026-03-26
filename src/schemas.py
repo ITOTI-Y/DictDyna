@@ -16,6 +16,13 @@ class DictionarySchema(BaseModel):
     slow_update_lr: float = Field(
         1e-5, ge=0, description="D fine-tune rate during RL, 0=fixed"
     )
+    reward_dim_weight: float = Field(
+        5.0, ge=1.0, description="Weight multiplier for reward-critical dimensions"
+    )
+    reward_dims: list[int] = Field(
+        default=[9, 15],
+        description="Reward-critical state indices (indoor_temp=9, hvac_power=15)",
+    )
 
 
 class SparseEncoderSchema(BaseModel):

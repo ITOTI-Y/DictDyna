@@ -35,6 +35,7 @@ class DictDynamicsModel(nn.Module):
         diff_mean: torch.Tensor | None = None,
         diff_std: torch.Tensor | None = None,
         obs_std: torch.Tensor | None = None,
+        dim_weights: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.encoder = sparse_encoder
@@ -58,6 +59,12 @@ class DictDynamicsModel(nn.Module):
                 else torch.zeros_like(scale)
             )
             self.register_buffer("_bias", bias)
+
+        # Dimension-weighted loss
+        if dim_weights is not None:
+            self.register_buffer("dim_weights", dim_weights)
+        else:
+            self.dim_weights: torch.Tensor | None = None
 
     @property
     def n_atoms(self) -> int:
@@ -131,7 +138,10 @@ class DictDynamicsModel(nn.Module):
         """
         pred_next, alpha = self.forward(state, action, building_id)
 
-        per_sample_mse = ((next_state - pred_next) ** 2).mean(dim=-1)  # (batch,)
+        per_dim_sq_err = (next_state - pred_next) ** 2  # (batch, d)
+        if self.dim_weights is not None:
+            per_dim_sq_err = per_dim_sq_err * self.dim_weights
+        per_sample_mse = per_dim_sq_err.mean(dim=-1)  # (batch,)
         if sample_weights is not None:
             mse_loss = (per_sample_mse * sample_weights).mean()
         else:
@@ -141,9 +151,16 @@ class DictDynamicsModel(nn.Module):
 
         sparsity = (alpha.abs() < 1e-6).float().mean().item()
 
-        return total_loss, {
+        metrics: dict[str, float] = {
             "mse_loss": mse_loss.item(),
             "l1_loss": l1_loss.item(),
             "total_loss": total_loss.item(),
             "sparsity": sparsity,
         }
+        if self.dim_weights is not None:
+            raw_sq_err = (next_state - pred_next) ** 2
+            reward_mask = self.dim_weights > 1.0
+            metrics["mse_reward_dims"] = raw_sq_err[:, reward_mask].mean().item()
+            metrics["mse_other_dims"] = raw_sq_err[:, ~reward_mask].mean().item()
+
+        return total_loss, metrics

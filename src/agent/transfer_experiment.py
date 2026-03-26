@@ -17,7 +17,7 @@ from loguru import logger
 
 from src.agent.dyna_sac import DynaSAC
 from src.schemas import TrainSchema
-from src.utils import get_device, seed_everything, sinergym_workdir
+from src.utils import build_dim_weights, get_device, seed_everything, sinergym_workdir
 
 with contextlib.suppress(ImportError):
     import sinergym  # noqa: F401
@@ -369,11 +369,18 @@ class FewShotTransferExperiment:
             shared_hidden_dims=self.config.encoder.shared_hidden_dims,
             topk_k=self.config.encoder.topk_k,
         ).to(self.device)
+        dim_weights = build_dim_weights(
+            self.state_dim,
+            self.config.dictionary.reward_dims,
+            self.config.dictionary.reward_dim_weight,
+            self.device,
+        )
         ctx_model = ContextDynamicsModel(
             dictionary=self.dictionary.to(self.device),
             context_encoder=ctx_enc,
             conditioned_encoder=cond_enc,
             learnable_dict=True,
+            dim_weights=dim_weights,
         ).to(self.device)
 
         # Replace DynaSAC's world model and rollout gen

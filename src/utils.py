@@ -31,6 +31,25 @@ def get_device(device: str = "auto") -> torch.device:
     return torch.device(device)
 
 
+def build_dim_weights(
+    state_dim: int,
+    reward_dims: list[int],
+    reward_dim_weight: float,
+    device: torch.device | None = None,
+) -> torch.Tensor | None:
+    """Build per-dimension weight vector for WM loss.
+
+    Returns None if reward_dim_weight <= 1.0 (uniform, backward compatible).
+    """
+    if reward_dim_weight <= 1.0:
+        return None
+    weights = torch.ones(state_dim, device=device)
+    for idx in reward_dims:
+        if 0 <= idx < state_dim:
+            weights[idx] = reward_dim_weight
+    return weights
+
+
 @contextmanager
 def sinergym_workdir(path: str = "output/tmp"):
     """Temporarily change CWD so Sinergym writes EnergyPlus temp files there."""

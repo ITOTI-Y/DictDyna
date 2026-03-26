@@ -14,7 +14,7 @@ from src.agent.dyna_sac import DynaSAC
 from src.agent.replay_buffer import ReplayBuffer, TaggedReplayBuffer
 from src.agent.rollout import ModelRollout
 from src.schemas import TrainSchema
-from src.utils import get_device, seed_everything, sinergym_workdir
+from src.utils import build_dim_weights, get_device, seed_everything, sinergym_workdir
 from src.world_model.dict_dynamics import DictDynamicsModel
 from src.world_model.model_trainer import ContextWorldModelTrainer, WorldModelTrainer
 
@@ -109,6 +109,14 @@ class MultiBuildingDynaSAC:
         if context_mode:
             self._setup_context(dictionary, config, dict_data, state_dim, action_dim)
 
+        # Build dim_weights for world model loss weighting
+        self._dim_weights = build_dim_weights(
+            state_dim,
+            config.dictionary.reward_dims,
+            config.dictionary.reward_dim_weight,
+            self.device,
+        )
+
         # Replace world model with shared-private version for shared mode
         if not independent_dict and not context_mode:
             from src.world_model.shared_private_dynamics import SharedPrivateWorldModel
@@ -124,6 +132,7 @@ class MultiBuildingDynaSAC:
                 n_buildings=self.n_buildings,
                 topk_shared=config.encoder.topk_k // 2,
                 topk_private=config.encoder.topk_k // 2,
+                dim_weights=self._dim_weights,
             ).to(self.device)
             # Replace DynaSAC's world model and trainer
             self.dyna.world_model = sp_model
@@ -194,6 +203,7 @@ class MultiBuildingDynaSAC:
                 dictionary=random_dict.to(self.device),
                 sparse_encoder=encoder,
                 learnable_dict=True,  # must learn from scratch
+                dim_weights=self._dim_weights,
             ).to(self.device)
 
             trainer = WorldModelTrainer(
@@ -258,6 +268,7 @@ class MultiBuildingDynaSAC:
             context_encoder=context_encoder,
             conditioned_encoder=conditioned_encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
+            dim_weights=self._dim_weights,
         ).to(self.device)
 
         # Replace DynaSAC's world model and trainer

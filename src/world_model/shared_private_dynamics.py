@@ -191,9 +191,16 @@ class SharedPrivateWorldModel(nn.Module):
         n_buildings: int = 1,
         topk_shared: int = 8,
         topk_private: int = 8,
+        dim_weights: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         n_shared = shared_dict.shape[1]
+
+        # Dimension-weighted loss
+        if dim_weights is not None:
+            self.register_buffer("dim_weights", dim_weights)
+        else:
+            self.dim_weights: torch.Tensor | None = None
 
         self.encoder = SharedPrivateEncoder(
             state_dim=state_dim,
@@ -256,7 +263,10 @@ class SharedPrivateWorldModel(nn.Module):
         delta = self.dynamics(alpha_s, alpha_p)
         pred = state + delta
 
-        per_sample_mse = ((next_state - pred) ** 2).mean(dim=-1)
+        per_dim_sq_err = (next_state - pred) ** 2
+        if self.dim_weights is not None:
+            per_dim_sq_err = per_dim_sq_err * self.dim_weights
+        per_sample_mse = per_dim_sq_err.mean(dim=-1)
         if sample_weights is not None:
             mse_loss = (per_sample_mse * sample_weights).mean()
         else:
@@ -269,7 +279,7 @@ class SharedPrivateWorldModel(nn.Module):
         sparsity_s = (alpha_s.abs() < 1e-6).float().mean().item()
         sparsity_p = (alpha_p.abs() < 1e-6).float().mean().item()
 
-        return total_loss, {
+        metrics: dict[str, float] = {
             "mse_loss": mse_loss.item(),
             "l1_shared": l1_shared.item(),
             "l1_private": l1_private.item(),
@@ -277,6 +287,13 @@ class SharedPrivateWorldModel(nn.Module):
             "sparsity_shared": sparsity_s,
             "sparsity_private": sparsity_p,
         }
+        if self.dim_weights is not None:
+            raw_sq_err = (next_state - pred) ** 2
+            reward_mask = self.dim_weights > 1.0
+            metrics["mse_reward_dims"] = raw_sq_err[:, reward_mask].mean().item()
+            metrics["mse_other_dims"] = raw_sq_err[:, ~reward_mask].mean().item()
+
+        return total_loss, metrics
 
     @property
     def dictionary(self) -> nn.Parameter:
