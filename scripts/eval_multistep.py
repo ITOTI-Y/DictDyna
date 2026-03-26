@@ -47,6 +47,7 @@ def build_and_train(
     identity_penalty_lambda: float = 0.0,
     grad_clip_norm: float = float("inf"),
     grad_clip_dict_norm: float = float("inf"),
+    reward_dim_weight: float = 1.0,
     label: str = "model",
 ) -> DictDynamicsModel:
     """Build and train a world model, return the trained model."""
@@ -85,6 +86,8 @@ def build_and_train(
         identity_penalty_lambda=identity_penalty_lambda,
         dim_weight_ema_decay=0.99,
         use_dim_weighting=use_dim_weighting,
+        reward_dim_indices=[9, 15] if reward_dim_weight > 1.0 else None,
+        reward_dim_weight=reward_dim_weight,
     )
 
     train_s = torch.tensor(data["train"]["states"], dtype=torch.float32)
@@ -141,15 +144,11 @@ def evaluate_multistep(
         all_start = []
 
         for idx in starts:
-            s = torch.tensor(
-                states[idx], dtype=torch.float32
-            ).unsqueeze(0)
+            s = torch.tensor(states[idx], dtype=torch.float32).unsqueeze(0)
 
             # Autoregressive rollout
             for step in range(h):
-                a = torch.tensor(
-                    actions[idx + step], dtype=torch.float32
-                ).unsqueeze(0)
+                a = torch.tensor(actions[idx + step], dtype=torch.float32).unsqueeze(0)
                 with torch.no_grad():
                     s = model.predict(s, a)
 
@@ -182,87 +181,139 @@ def main():
     n_epochs = 50
     horizons = [1, 2, 3, 5, 8]
 
-    # Train baseline
+    improved_kwargs = {
+        "use_layernorm": True,
+        "use_dim_weighting": True,
+        "identity_penalty_lambda": 0.5,
+        "grad_clip_norm": 1.0,
+        "grad_clip_dict_norm": 0.1,
+    }
+
     logger.info(f"\n=== Training BASELINE ({n_epochs} epochs) ===")
     baseline_model = build_and_train(
-        data, n_epochs=n_epochs,
-        use_layernorm=False, use_dim_weighting=False,
+        data,
+        n_epochs=n_epochs,
+        use_layernorm=False,
+        use_dim_weighting=False,
         identity_penalty_lambda=0.0,
-        grad_clip_norm=float("inf"), grad_clip_dict_norm=float("inf"),
+        grad_clip_norm=float("inf"),
+        grad_clip_dict_norm=float("inf"),
         label="Baseline",
     )
 
-    # Train improved
-    logger.info(f"\n=== Training IMPROVED ({n_epochs} epochs) ===")
+    logger.info(f"\n=== Training IMPROVED (no reward weight) ({n_epochs} epochs) ===")
     improved_model = build_and_train(
-        data, n_epochs=n_epochs,
-        use_layernorm=True, use_dim_weighting=True,
-        identity_penalty_lambda=0.5,
-        grad_clip_norm=1.0, grad_clip_dict_norm=0.1,
+        data,
+        n_epochs=n_epochs,
+        **improved_kwargs,
+        reward_dim_weight=1.0,
         label="Improved",
+    )
+
+    logger.info(f"\n=== Training IMPROVED + reward_w=1.5 ({n_epochs} epochs) ===")
+    rw15_model = build_and_train(
+        data,
+        n_epochs=n_epochs,
+        **improved_kwargs,
+        reward_dim_weight=1.5,
+        label="RW=1.5",
     )
 
     # Evaluate multi-step
     logger.info("\n=== Evaluating multi-step autoregressive prediction ===")
-    np.random.seed(123)
-    baseline_results = evaluate_multistep(baseline_model, data, horizons)
-    np.random.seed(123)
-    improved_results = evaluate_multistep(improved_model, data, horizons)
+    variants = {}
+    for name, model in [
+        ("Baseline", baseline_model),
+        ("Improved", improved_model),
+        ("RW=1.5", rw15_model),
+    ]:
+        np.random.seed(123)
+        variants[name] = evaluate_multistep(model, data, horizons)
 
-    # Identity baseline (predict s' = s_0 for all horizons)
-    print(f"\n{'=' * 75}")
+    # Print comparison table
+    print(f"\n{'=' * 90}")
     print("MULTI-STEP AUTOREGRESSIVE PREDICTION (office_hot)")
-    print(f"{'=' * 75}")
-    print(f"{'H':>3} | {'Identity':>10} | {'Baseline':>10} | {'Improved':>10} | "
-          f"{'B vs Id':>8} | {'I vs Id':>8} | {'I vs B':>8}")
-    print("-" * 75)
+    print(f"{'=' * 90}")
+    header = f"{'H':>3} | {'Identity':>10}"
+    for name in variants:
+        header += f" | {name:>10}"
+    header += " |  RW1.5 vs B"
+    print(header)
+    print("-" * 90)
 
     for h in horizons:
-        id_mse = baseline_results[h]["identity_mse"].mean()
-        b_mse = baseline_results[h]["total_mse"]
-        i_mse = improved_results[h]["total_mse"]
-        b_vs_id = b_mse / (id_mse + 1e-10)
-        i_vs_id = i_mse / (id_mse + 1e-10)
-        i_vs_b = (i_mse - b_mse) / (b_mse + 1e-10) * 100
-        print(f"{h:3d} | {id_mse:10.4f} | {b_mse:10.4f} | {i_mse:10.4f} | "
-              f"{b_vs_id:7.2f}x | {i_vs_id:7.2f}x | {i_vs_b:+7.1f}%")
+        id_mse = variants["Baseline"][h]["identity_mse"].mean()
+        row = f"{h:3d} | {id_mse:10.4f}"
+        mses = {}
+        for name, res in variants.items():
+            m = res[h]["total_mse"]
+            mses[name] = m
+            row += f" | {m:10.4f}"
+        chg = (mses["RW=1.5"] - mses["Baseline"]) / (mses["Baseline"] + 1e-10) * 100
+        row += f" | {chg:+7.1f}%"
+        print(row)
+
+    # Reward-relevant dimensions: indoor_temp (dim 9) and hvac_power (dim 15)
+    print(f"\n{'=' * 90}")
+    print("REWARD-RELEVANT DIMS: indoor_temp (dim 9) + hvac_power (dim 15)")
+    print(f"{'=' * 90}")
+    for dim_idx, dim_name in [(9, "indoor_temp"), (15, "hvac_power")]:
+        print(f"\n  {dim_name} (dim {dim_idx}):")
+        print(
+            f"  {'H':>4} | {'Identity':>10} | {'Baseline':>10} | {'Improved':>10} | "
+            f"{'RW=1.5':>10} | {'Impr vs B':>10} | {'RW1.5 vs B':>10}"
+        )
+        print(f"  {'-' * 80}")
+        for h in horizons:
+            id_m = variants["Baseline"][h]["per_dim_mse"][dim_idx]
+            b_m = variants["Baseline"][h]["per_dim_mse"][dim_idx]
+            i_m = variants["Improved"][h]["per_dim_mse"][dim_idx]
+            r_m = variants["RW=1.5"][h]["per_dim_mse"][dim_idx]
+            i_chg = (i_m - b_m) / (b_m + 1e-10) * 100
+            r_chg = (r_m - b_m) / (b_m + 1e-10) * 100
+            print(
+                f"  {h:4d} | {id_m:10.4f} | {b_m:10.4f} | {i_m:10.4f} | "
+                f"{r_m:10.4f} | {i_chg:+9.1f}% | {r_chg:+9.1f}%"
+            )
 
     # Error growth rate analysis
     print(f"\n{'=' * 75}")
     print("ERROR GROWTH RATE (MSE[H] / MSE[1])")
     print(f"{'=' * 75}")
-    print(f"{'H':>3} | {'Baseline':>10} | {'Improved':>10} | {'Ratio diff':>10}")
-    print("-" * 45)
+    header = f"{'H':>3}"
+    for name in variants:
+        header += f" | {name:>10}"
+    print(header)
+    print("-" * 50)
 
-    b_h1 = baseline_results[1]["total_mse"]
-    i_h1 = improved_results[1]["total_mse"]
+    h1_vals = {name: res[1]["total_mse"] for name, res in variants.items()}
     for h in horizons:
-        b_growth = baseline_results[h]["total_mse"] / (b_h1 + 1e-10)
-        i_growth = improved_results[h]["total_mse"] / (i_h1 + 1e-10)
-        print(f"{h:3d} | {b_growth:10.2f}x | {i_growth:10.2f}x | {i_growth - b_growth:+9.2f}")
+        row = f"{h:3d}"
+        for name, res in variants.items():
+            growth = res[h]["total_mse"] / (h1_vals[name] + 1e-10)
+            row += f" | {growth:9.2f}x"
+        print(row)
 
     # Per-dimension analysis at H=5 (focus on non-trivial dims)
     h5 = 5
-    print(f"\n{'=' * 75}")
+    print(f"\n{'=' * 90}")
     print(f"PER-DIMENSION MSE AT H={h5} (non-trivial dims only)")
-    print(f"{'=' * 75}")
-    print(f"{'Dim':>4} | {'Identity':>10} | {'Baseline':>10} | {'Improved':>10} | "
-          f"{'B/Id':>6} | {'I/Id':>6} | {'I vs B':>8}")
-    print("-" * 75)
+    print(f"{'=' * 90}")
+    header = f"{'Dim':>4} | {'Identity':>10}"
+    for name in variants:
+        header += f" | {name:>10}"
+    print(header)
+    print("-" * 70)
 
-    state_dim = baseline_results[h5]["per_dim_mse"].shape[0]
+    state_dim = variants["Baseline"][h5]["per_dim_mse"].shape[0]
     for d in range(state_dim):
-        id_mse = baseline_results[h5]["identity_mse"][d]
+        id_mse = variants["Baseline"][h5]["identity_mse"][d]
         if id_mse < 1e-3:
             continue
-        b_mse = baseline_results[h5]["per_dim_mse"][d]
-        i_mse = improved_results[h5]["per_dim_mse"][d]
-        b_ratio = b_mse / (id_mse + 1e-10)
-        i_ratio = i_mse / (id_mse + 1e-10)
-        change = (i_mse - b_mse) / (b_mse + 1e-10) * 100
-        flag = " !!!" if b_ratio > 1.5 else ""
-        print(f"{d:4d} | {id_mse:10.4f} | {b_mse:10.4f} | {i_mse:10.4f} | "
-              f"{b_ratio:5.2f}x | {i_ratio:5.2f}x | {change:+7.1f}%{flag}")
+        row = f"{d:4d} | {id_mse:10.4f}"
+        for _name, res in variants.items():
+            row += f" | {res[h5]['per_dim_mse'][d]:10.4f}"
+        print(row)
 
 
 if __name__ == "__main__":

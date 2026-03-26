@@ -76,6 +76,15 @@ class WorldModelLossSchema(BaseModel):
     grad_clip_dict_norm: float = Field(
         0.1, gt=0, description="Gradient clip norm for dictionary"
     )
+    reward_dim_indices: list[int] = Field(
+        default=[9, 15],
+        description="State dim indices relevant to reward (indoor_temp=9, hvac_power=15)",
+    )
+    reward_dim_weight: float = Field(
+        3.0,
+        ge=1.0,
+        description="Extra loss weight multiplier for reward-relevant dimensions",
+    )
     probabilistic: bool = Field(
         False, description="Use probabilistic world model with per-atom variance"
     )

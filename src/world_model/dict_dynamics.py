@@ -128,6 +128,8 @@ class DictDynamicsModel(nn.Module):
         identity_penalty_lambda: float = 0.0,
         dim_weight_ema_decay: float = 0.99,
         use_dim_weighting: bool = False,
+        reward_dim_indices: list[int] | None = None,
+        reward_dim_weight: float = 1.0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute world model loss: weighted MSE + lambda * L1.
 
@@ -136,6 +138,8 @@ class DictDynamicsModel(nn.Module):
             identity_penalty_lambda: Penalty for being worse than identity.
             dim_weight_ema_decay: EMA decay for per-dimension weights.
             use_dim_weighting: Enable per-dimension adaptive weighting.
+            reward_dim_indices: Indices of reward-relevant dims for loss boost.
+            reward_dim_weight: Extra multiplier for reward-relevant dims.
         """
         pred_next, alpha = self.forward(state, action, building_id)
 
@@ -149,6 +153,8 @@ class DictDynamicsModel(nn.Module):
                 identity_penalty_lambda=identity_penalty_lambda,
                 sample_weights=sample_weights,
                 training=self.training,
+                reward_dim_indices=reward_dim_indices,
+                reward_dim_weight=reward_dim_weight,
             )
         else:
             per_sample_mse = ((next_state - pred_next) ** 2).mean(dim=-1)

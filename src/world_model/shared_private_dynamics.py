@@ -267,6 +267,8 @@ class SharedPrivateWorldModel(nn.Module):
         identity_penalty_lambda: float = 0.0,
         dim_weight_ema_decay: float = 0.99,
         use_dim_weighting: bool = False,
+        reward_dim_indices: list[int] | None = None,
+        reward_dim_weight: float = 1.0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute loss with separate sparsity for shared/private."""
         alpha_s, alpha_p = self.encoder(state, action, building_id)
@@ -283,6 +285,8 @@ class SharedPrivateWorldModel(nn.Module):
                 identity_penalty_lambda=identity_penalty_lambda,
                 sample_weights=sample_weights,
                 training=self.training,
+                reward_dim_indices=reward_dim_indices,
+                reward_dim_weight=reward_dim_weight,
             )
         else:
             per_sample_mse = ((next_state - pred) ** 2).mean(dim=-1)

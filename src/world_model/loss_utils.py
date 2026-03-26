@@ -16,6 +16,8 @@ def compute_dim_weighted_mse(
     identity_penalty_lambda: float = 0.5,
     sample_weights: torch.Tensor | None = None,
     training: bool = True,
+    reward_dim_indices: list[int] | None = None,
+    reward_dim_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute per-dimension weighted MSE with identity guard.
 
@@ -32,6 +34,8 @@ def compute_dim_weighted_mse(
         identity_penalty_lambda: Weight for identity guard penalty.
         sample_weights: Per-sample importance weights, shape (batch,).
         training: Whether in training mode (updates EMA in-place).
+        reward_dim_indices: Indices of reward-relevant dims for explicit boost.
+        reward_dim_weight: Extra multiplier for reward-relevant dims (>1 = boost).
 
     Returns:
         (weighted_mse_loss, extra_metrics_dict)
@@ -45,6 +49,14 @@ def compute_dim_weighted_mse(
             dim_ema.lerp_(batch_dim_mse, 1.0 - ema_decay)
         # Weight: harder dims get more gradient, normalized to mean=1
         dim_weights = dim_ema / (dim_ema.mean() + 1e-8)
+
+        # Explicit boost for reward-relevant dimensions
+        if reward_dim_indices and reward_dim_weight > 1.0:
+            for idx in reward_dim_indices:
+                if 0 <= idx < dim_weights.shape[0]:
+                    dim_weights[idx] = dim_weights[idx] * reward_dim_weight
+            # Re-normalize to keep overall scale stable
+            dim_weights = dim_weights / (dim_weights.mean() + 1e-8)
 
     # Apply per-dimension weights
     weighted_sq_err = per_dim_sq_err * dim_weights  # (batch, d)

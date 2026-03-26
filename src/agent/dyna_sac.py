@@ -133,6 +133,8 @@ class DynaSAC:
             identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
             dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
             use_dim_weighting=config.wm_loss.use_dim_weighting,
+            reward_dim_indices=config.wm_loss.reward_dim_indices,
+            reward_dim_weight=config.wm_loss.reward_dim_weight,
         )
 
         # Build sparse-code exploration module
