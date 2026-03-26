@@ -141,6 +141,11 @@ class MultiBuildingDynaSAC:
                 encoder_lr=config.dictionary.pretrain_lr,
                 dict_lr=config.dictionary.slow_update_lr,
                 sparsity_lambda=config.dictionary.sparsity_lambda,
+                grad_clip_norm=config.wm_loss.grad_clip_norm,
+                grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
+                identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
+                dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
+                use_dim_weighting=config.wm_loss.use_dim_weighting,
             )
             # Update rollout generator
             from src.agent.rollout import ModelRollout
@@ -211,6 +216,11 @@ class MultiBuildingDynaSAC:
                 encoder_lr=config.dictionary.pretrain_lr,
                 dict_lr=config.dictionary.slow_update_lr,
                 sparsity_lambda=config.dictionary.sparsity_lambda,
+                grad_clip_norm=config.wm_loss.grad_clip_norm,
+                grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
+                identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
+                dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
+                use_dim_weighting=config.wm_loss.use_dim_weighting,
             )
 
             rollout = ModelRollout(
@@ -261,6 +271,7 @@ class MultiBuildingDynaSAC:
             shared_hidden_dims=config.encoder.shared_hidden_dims,
             sparsity_method=config.encoder.sparsity_method,
             topk_k=config.encoder.topk_k,
+            use_layernorm=config.encoder.use_layernorm,
         ).to(self.device)
 
         ctx_model = ContextDynamicsModel(
@@ -279,6 +290,11 @@ class MultiBuildingDynaSAC:
             context_lr=ctx_cfg.context_lr,
             dict_lr=config.dictionary.slow_update_lr,
             sparsity_lambda=config.dictionary.sparsity_lambda,
+            grad_clip_norm=config.wm_loss.grad_clip_norm,
+            grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
+            identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
+            dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
+            use_dim_weighting=config.wm_loss.use_dim_weighting,
         )
         self.dyna.rollout_gen = ModelRollout(
             world_model=ctx_model,  # type: ignore[arg-type]

@@ -53,6 +53,10 @@ class DynaSAC:
         self.action_dim = action_dim
         self.building_ids = building_ids
 
+        # Soft top-k temperature annealing config
+        self._soft_topk_start = config.encoder.soft_topk_temperature
+        self._soft_topk_anneal_steps = config.encoder.soft_topk_anneal_steps
+
         # Build sparse encoder
         self.encoder = SparseEncoder(
             state_dim=state_dim,
@@ -64,6 +68,8 @@ class DynaSAC:
             activation=config.encoder.activation,
             sparsity_method=config.encoder.sparsity_method,
             topk_k=config.encoder.topk_k,
+            use_layernorm=config.encoder.use_layernorm,
+            soft_topk_temperature=config.encoder.soft_topk_temperature,
         ).to(self.device)
 
         # Build world model (normalized obs space, no conversion needed)
@@ -129,6 +135,11 @@ class DynaSAC:
             encoder_lr=config.dictionary.pretrain_lr,
             dict_lr=config.dictionary.slow_update_lr,
             sparsity_lambda=config.dictionary.sparsity_lambda,
+            grad_clip_norm=config.wm_loss.grad_clip_norm,
+            grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
+            identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
+            dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
+            use_dim_weighting=config.wm_loss.use_dim_weighting,
         )
 
         # Build sparse-code exploration module
@@ -151,6 +162,10 @@ class DynaSAC:
             state_dim=state_dim,
             action_dim=action_dim,
         )
+
+        # Model quality tracking for adaptive horizon
+        self._model_quality_ema = 0.0
+        self._model_quality_decay = 0.99
 
         # Building id to index mapping
         self._bid_to_idx = {bid: str(i) for i, bid in enumerate(building_ids)}
@@ -181,6 +196,13 @@ class DynaSAC:
         """
         metrics: dict[str, float] = {}
         bid_idx = self._bid_to_idx[building_id]
+
+        # Anneal soft top-k temperature
+        if self._soft_topk_start > 0 and self._soft_topk_anneal_steps > 0:
+            progress = min(global_step / self._soft_topk_anneal_steps, 1.0)
+            temp = self._soft_topk_start * (1.0 - progress) + 0.01 * progress
+            self.encoder.soft_topk_temperature = temp
+            metrics["diag/soft_topk_temp"] = temp
 
         # 1. Store real transition
         self.buffer.add_real(state, action, reward, next_state, done)
@@ -217,11 +239,46 @@ class DynaSAC:
             )
             metrics.update({f"wm/{k}": v for k, v in wm_metrics.items()})
 
+            # Multi-step consistency training (if horizon > 1 and enough data)
+            ms_horizon = self.config.dyna.multistep_horizon
+            if ms_horizon > 1 and self.buffer.real_size > ms_horizon + 1:
+                seq_batch = self.buffer.real_buffer.sample_sequence(
+                    self.config.batch_size, ms_horizon, self.device
+                )
+                ms_metrics = self.wm_trainer.train_multistep(
+                    seq_batch["states"],
+                    seq_batch["actions"],
+                    seq_batch["next_states"],
+                    building_id=bid_idx,
+                    discount=self.config.dyna.multistep_discount,
+                    teacher_forcing_ratio=self.config.dyna.teacher_forcing_ratio,
+                )
+                metrics.update({f"wm/{k}": v for k, v in ms_metrics.items()})
+
         # 3. Model rollouts (only after warmup period)
         use_model = global_step >= self.config.dyna.rollout_start_step
         if use_model:
+            # Compute model quality: how much better than identity mapping
+            if "wm/mse_loss" in metrics and "wm/identity_penalty" in metrics:
+                wm_mse = metrics["wm/mse_loss"]
+                id_pen = metrics["wm/identity_penalty"]
+                # quality ∈ [0, 1]: 0 = worse than identity, 1 = much better
+                quality = max(0.0, 1.0 - id_pen / (wm_mse + 1e-8))
+                self._model_quality_ema = (
+                    self._model_quality_decay * self._model_quality_ema
+                    + (1 - self._model_quality_decay) * quality
+                )
+                metrics["diag/model_quality"] = self._model_quality_ema
+
+            # Adaptive horizon: scale by model quality
+            max_horizon = self.config.dyna.rollout_horizon
+            if max_horizon > 1 and self._model_quality_ema > 0:
+                horizon = max(1, int(self._model_quality_ema * max_horizon))
+            else:
+                horizon = max_horizon
+            metrics["diag/effective_horizon"] = float(horizon)
+
             n_rollouts = self.config.dyna.rollouts_per_step
-            horizon = self.config.dyna.rollout_horizon
             start_batch = self.buffer.real_buffer.sample(n_rollouts, self.device)
             start_states = start_batch["states"].cpu().numpy()
 
@@ -244,19 +301,41 @@ class DynaSAC:
                 self.exploration.n_unique_patterns
             )
 
-        # 4. SAC update (pure real data during warmup, mixed after)
+        # 4. SAC update (with optional MVE targets)
         model_ratio = self.config.dyna.model_to_real_ratio if use_model else 0.0
-        mixed_batch = self.buffer.sample(
-            self.config.batch_size,
-            model_ratio=model_ratio,
-            device=self.device,
-        )
+        if self.config.dyna.use_mve:
+            # MVE mode: use only real data, extend value with model rollouts
+            mixed_batch = self.buffer.real_buffer.sample(
+                self.config.batch_size, self.device
+            )
+        else:
+            mixed_batch = self.buffer.sample(
+                self.config.batch_size,
+                model_ratio=model_ratio,
+                device=self.device,
+            )
+
+        mve_targets = None
+        if use_model and self.config.dyna.use_mve:
+            mve_targets = self.rollout_gen.compute_mve_targets(
+                states=mixed_batch["states"],
+                actions=mixed_batch["actions"],
+                rewards=mixed_batch["rewards"],
+                next_states=mixed_batch["next_states"],
+                critic_target=self.critic_target,
+                gamma=self.config.gamma,
+                alpha=self.sac_trainer.alpha.item(),
+                building_id=bid_idx,
+                horizon=self.config.dyna.mve_horizon,
+            )
+
         sac_metrics = self.sac_trainer.update(
             mixed_batch["states"],
             mixed_batch["actions"],
             mixed_batch["rewards"],
             mixed_batch["next_states"],
             mixed_batch["dones"],
+            mve_target_q=mve_targets,
         )
         metrics.update({f"sac/{k}": v for k, v in sac_metrics.items()})
 

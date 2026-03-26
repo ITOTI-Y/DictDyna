@@ -71,6 +71,37 @@ class ReplayBuffer:
             "dones": torch.tensor(self.dones[indices], device=device),
         }
 
+    def sample_sequence(
+        self,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Sample consecutive transition sequences for multi-step training.
+
+        Returns:
+            Dict with keys: states, actions, next_states, dones.
+            Each has shape (batch_size, seq_len, dim).
+        """
+        device = device or torch.device("cpu")
+        # Valid start indices: must have seq_len consecutive transitions
+        # Avoid crossing circular buffer boundary
+        max_start = self.size - seq_len
+        if max_start <= 0:
+            raise ValueError(f"Buffer size {self.size} too small for seq_len {seq_len}")
+        starts = np.random.randint(0, max_start, size=batch_size)
+
+        # Build index array: (batch_size, seq_len)
+        offsets = np.arange(seq_len)
+        indices = starts[:, None] + offsets[None, :]  # (batch, seq_len)
+
+        return {
+            "states": torch.tensor(self.states[indices], device=device),
+            "actions": torch.tensor(self.actions[indices], device=device),
+            "next_states": torch.tensor(self.next_states[indices], device=device),
+            "dones": torch.tensor(self.dones[indices], device=device),
+        }
+
     def __len__(self) -> int:
         return self.size
 

@@ -8,6 +8,7 @@ When policy operates in obs-normalized space and dictionary in diff-normalized s
 import torch
 import torch.nn as nn
 
+from src.world_model.loss_utils import compute_dim_weighted_mse
 from src.world_model.sparse_encoder import SparseEncoder
 
 
@@ -44,6 +45,9 @@ class DictDynamicsModel(nn.Module):
             self.dictionary = nn.Parameter(dictionary.clone())
         else:
             self.register_buffer("dictionary", dictionary.clone())
+
+        # Per-dimension MSE EMA for adaptive loss weighting
+        self.register_buffer("_dim_ema", torch.ones(dictionary.shape[0]))
 
         # Space conversion buffers (None = raw mode, no conversion)
         self._has_conversion = diff_std is not None and obs_std is not None
@@ -128,24 +132,42 @@ class DictDynamicsModel(nn.Module):
         building_id: str = "0",
         sparsity_lambda: float = 0.1,
         sample_weights: torch.Tensor | None = None,
+        identity_penalty_lambda: float = 0.0,
+        dim_weight_ema_decay: float = 0.99,
+        use_dim_weighting: bool = False,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute world model loss: weighted MSE + lambda * L1.
 
         Args:
             sample_weights: Per-sample importance weights, shape (batch,).
-                If provided, MSE is weighted: transitions with higher
-                TD-error or reward magnitude are reconstructed more accurately.
+            identity_penalty_lambda: Penalty for being worse than identity.
+            dim_weight_ema_decay: EMA decay for per-dimension weights.
+            use_dim_weighting: Enable per-dimension adaptive weighting.
         """
         pred_next, alpha = self.forward(state, action, building_id)
 
-        per_dim_sq_err = (next_state - pred_next) ** 2  # (batch, d)
-        if self.dim_weights is not None:
-            per_dim_sq_err = per_dim_sq_err * self.dim_weights
-        per_sample_mse = per_dim_sq_err.mean(dim=-1)  # (batch,)
-        if sample_weights is not None:
-            mse_loss = (per_sample_mse * sample_weights).mean()
+        if use_dim_weighting or identity_penalty_lambda > 0:
+            mse_loss, extra = compute_dim_weighted_mse(
+                pred=pred_next,
+                target=next_state,
+                state=state,
+                dim_ema=self._dim_ema,  # ty: ignore[invalid-argument-type]
+                ema_decay=dim_weight_ema_decay,
+                identity_penalty_lambda=identity_penalty_lambda,
+                sample_weights=sample_weights,
+                training=self.training,
+            )
         else:
-            mse_loss = per_sample_mse.mean()
+            per_dim_sq_err = (next_state - pred_next) ** 2
+            if self.dim_weights is not None:
+                per_dim_sq_err = per_dim_sq_err * self.dim_weights
+            per_sample_mse = per_dim_sq_err.mean(dim=-1)
+            if sample_weights is not None:
+                mse_loss = (per_sample_mse * sample_weights).mean()
+            else:
+                mse_loss = per_sample_mse.mean()
+            extra = {}
+
         l1_loss = torch.mean(torch.abs(alpha))
         total_loss = mse_loss + sparsity_lambda * l1_loss
 
@@ -157,6 +179,7 @@ class DictDynamicsModel(nn.Module):
             "total_loss": total_loss.item(),
             "sparsity": sparsity,
         }
+        metrics.update(extra)
         if self.dim_weights is not None:
             raw_sq_err = (next_state - pred_next) ** 2
             reward_mask = self.dim_weights > 1.0

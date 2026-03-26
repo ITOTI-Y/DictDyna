@@ -240,14 +240,23 @@ class SACTrainer:
         rewards: torch.Tensor,
         next_states: torch.Tensor,
         dones: torch.Tensor,
+        mve_target_q: torch.Tensor | None = None,
     ) -> dict[str, float]:
-        """Single SAC update step."""
+        """Single SAC update step.
+
+        Args:
+            mve_target_q: Pre-computed MVE Q-targets. If provided, bypasses
+                standard TD target computation for the critic update.
+        """
         # --- Critic update ---
-        with torch.no_grad():
-            next_actions, next_log_probs = self.actor(next_states)
-            q1_next, q2_next = self.critic_target(next_states, next_actions)
-            q_next = torch.min(q1_next, q2_next) - self.alpha * next_log_probs
-            target_q = rewards + (1.0 - dones) * self.gamma * q_next
+        if mve_target_q is not None:
+            target_q = mve_target_q
+        else:
+            with torch.no_grad():
+                next_actions, next_log_probs = self.actor(next_states)
+                q1_next, q2_next = self.critic_target(next_states, next_actions)
+                q_next = torch.min(q1_next, q2_next) - self.alpha * next_log_probs
+                target_q = rewards + (1.0 - dones) * self.gamma * q_next
 
         q1, q2 = self.critic(states, actions)
         critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
