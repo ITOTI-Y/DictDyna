@@ -57,11 +57,14 @@ class SparseEncoder(nn.Module):
         activation: str = "relu",
         sparsity_method: str = "l1_penalty",
         topk_k: int = 16,
+        use_layernorm: bool = False,
+        soft_topk_temperature: float = 0.0,
     ) -> None:
         super().__init__()
         self.n_atoms = n_atoms
         self.sparsity_method = sparsity_method
         self.topk_k = topk_k
+        self.soft_topk_temperature = soft_topk_temperature
 
         shared_hidden_dims = shared_hidden_dims or [256, 256]
         act_fn = {"relu": nn.ReLU, "gelu": nn.GELU, "tanh": nn.Tanh}[activation]
@@ -70,7 +73,10 @@ class SparseEncoder(nn.Module):
         layers: list[nn.Module] = []
         in_dim = state_dim + action_dim
         for h in shared_hidden_dims:
-            layers.extend([nn.Linear(in_dim, h), act_fn()])
+            layers.append(nn.Linear(in_dim, h))
+            if use_layernorm:
+                layers.append(nn.LayerNorm(h))
+            layers.append(act_fn())
             in_dim = h
         self.shared_trunk = nn.Sequential(*layers)
         self.shared_output_dim = in_dim
@@ -117,10 +123,24 @@ class SparseEncoder(nn.Module):
         return alpha
 
     def _topk_sparsify(self, alpha: torch.Tensor) -> torch.Tensor:
-        """Keep only top-k absolute values, zero out the rest."""
+        """Apply top-k sparsity. Uses soft mask during training if temperature > 0.
+
+        Soft top-k: differentiable relaxation via temperature-scaled sigmoid,
+        allowing gradient flow to all atoms. At inference, falls back to hard mask.
+        """
+        if self.soft_topk_temperature > 0 and self.training:
+            return self._soft_topk(alpha, self.soft_topk_temperature)
+        # Hard top-k (inference or temperature=0)
         _, indices = torch.topk(alpha.abs(), self.topk_k, dim=-1)
         mask = torch.zeros_like(alpha)
         mask.scatter_(-1, indices, 1.0)
+        return alpha * mask
+
+    def _soft_topk(self, alpha: torch.Tensor, temperature: float) -> torch.Tensor:
+        """Differentiable soft top-k via temperature-scaled sigmoid."""
+        abs_alpha = alpha.abs()
+        kth_val = abs_alpha.topk(self.topk_k, dim=-1).values[:, -1:]
+        mask = torch.sigmoid((abs_alpha - kth_val) / temperature)
         return alpha * mask
 
     def get_shared_params(self) -> list[nn.Parameter]:

@@ -10,6 +10,8 @@ Prediction: delta = alpha_shared @ D_shared.T + alpha_private @ D_private.T
 import torch
 import torch.nn as nn
 
+from src.world_model.loss_utils import compute_dim_weighted_mse
+
 
 class SharedPrivateDynamics(nn.Module):
     """Shared-Private dictionary dynamics model.
@@ -104,16 +106,22 @@ class SharedPrivateEncoder(nn.Module):
         n_buildings: int = 1,
         topk_shared: int = 8,
         topk_private: int = 8,
+        use_layernorm: bool = False,
+        soft_topk_temperature: float = 0.0,
     ) -> None:
         super().__init__()
         self.topk_shared = topk_shared
         self.topk_private = topk_private
+        self.soft_topk_temperature = soft_topk_temperature
 
         hidden_dims = hidden_dims or [256, 256]
         layers: list[nn.Module] = []
         in_dim = state_dim + action_dim
         for h in hidden_dims:
-            layers.extend([nn.Linear(in_dim, h), nn.ReLU()])
+            layers.append(nn.Linear(in_dim, h))
+            if use_layernorm:
+                layers.append(nn.LayerNorm(h))
+            layers.append(nn.ReLU())
             in_dim = h
         self.trunk = nn.Sequential(*layers)
 
@@ -159,9 +167,13 @@ class SharedPrivateEncoder(nn.Module):
             nn.Linear(adapter_dim, n_private),
         )
 
-    @staticmethod
-    def _topk(x: torch.Tensor, k: int) -> torch.Tensor:
-        """Keep only top-k absolute values."""
+    def _topk(self, x: torch.Tensor, k: int) -> torch.Tensor:
+        """Apply top-k sparsity with optional soft relaxation."""
+        if self.soft_topk_temperature > 0 and self.training:
+            abs_x = x.abs()
+            kth_val = abs_x.topk(k, dim=-1).values[:, -1:]
+            mask = torch.sigmoid((abs_x - kth_val) / self.soft_topk_temperature)
+            return x * mask
         _, indices = torch.topk(x.abs(), k, dim=-1)
         mask = torch.zeros_like(x)
         mask.scatter_(-1, indices, 1.0)
@@ -194,6 +206,9 @@ class SharedPrivateWorldModel(nn.Module):
     ) -> None:
         super().__init__()
         n_shared = shared_dict.shape[1]
+
+        # Per-dimension MSE EMA for adaptive loss weighting
+        self.register_buffer("_dim_ema", torch.ones(state_dim))
 
         self.encoder = SharedPrivateEncoder(
             state_dim=state_dim,
@@ -249,18 +264,33 @@ class SharedPrivateWorldModel(nn.Module):
         building_id: str = "0",
         sparsity_lambda: float = 0.1,
         sample_weights: torch.Tensor | None = None,
+        identity_penalty_lambda: float = 0.0,
+        dim_weight_ema_decay: float = 0.99,
+        use_dim_weighting: bool = False,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute loss with separate sparsity for shared/private."""
-        # Get separate alpha_s and alpha_p from encoder directly
         alpha_s, alpha_p = self.encoder(state, action, building_id)
         delta = self.dynamics(alpha_s, alpha_p)
         pred = state + delta
 
-        per_sample_mse = ((next_state - pred) ** 2).mean(dim=-1)
-        if sample_weights is not None:
-            mse_loss = (per_sample_mse * sample_weights).mean()
+        if use_dim_weighting or identity_penalty_lambda > 0:
+            mse_loss, extra = compute_dim_weighted_mse(
+                pred=pred,
+                target=next_state,
+                state=state,
+                dim_ema=self._dim_ema,  # ty: ignore[invalid-argument-type]
+                ema_decay=dim_weight_ema_decay,
+                identity_penalty_lambda=identity_penalty_lambda,
+                sample_weights=sample_weights,
+                training=self.training,
+            )
         else:
-            mse_loss = per_sample_mse.mean()
+            per_sample_mse = ((next_state - pred) ** 2).mean(dim=-1)
+            if sample_weights is not None:
+                mse_loss = (per_sample_mse * sample_weights).mean()
+            else:
+                mse_loss = per_sample_mse.mean()
+            extra = {}
 
         l1_shared = torch.mean(torch.abs(alpha_s))
         l1_private = torch.mean(torch.abs(alpha_p))
@@ -269,7 +299,7 @@ class SharedPrivateWorldModel(nn.Module):
         sparsity_s = (alpha_s.abs() < 1e-6).float().mean().item()
         sparsity_p = (alpha_p.abs() < 1e-6).float().mean().item()
 
-        return total_loss, {
+        metrics = {
             "mse_loss": mse_loss.item(),
             "l1_shared": l1_shared.item(),
             "l1_private": l1_private.item(),
@@ -277,6 +307,9 @@ class SharedPrivateWorldModel(nn.Module):
             "sparsity_shared": sparsity_s,
             "sparsity_private": sparsity_p,
         }
+        metrics.update(extra)
+
+        return total_loss, metrics
 
     @property
     def dictionary(self) -> nn.Parameter:

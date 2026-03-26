@@ -14,6 +14,18 @@ encoder:
   activation: relu
   sparsity_method: topk
   topk_k: 16
+  use_layernorm: true
+  soft_topk_temperature: 1.0
+  soft_topk_anneal_steps: 50000
+
+wm_loss:
+  use_dim_weighting: true
+  dim_weight_ema_decay: 0.99
+  identity_penalty_lambda: 0.5
+  grad_clip_norm: 1.0
+  grad_clip_dict_norm: 0.1
+  probabilistic: false
+  uncertainty_penalty: 1.0
 
 dyna:
   rollout_horizon: 1
@@ -21,6 +33,11 @@ dyna:
   model_to_real_ratio: 0.2
   model_update_freq: 1
   rollout_start_step: 5000
+  multistep_horizon: 1
+  multistep_discount: 0.95
+  teacher_forcing_ratio: 0.5
+  use_mve: false
+  mve_horizon: 3
 
 sac:
   actor_lr: 3e-4

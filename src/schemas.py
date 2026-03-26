@@ -30,6 +30,17 @@ class SparseEncoderSchema(BaseModel):
     topk_k: int = Field(
         16, ge=1, description="If sparsity_method=topk, keep top-k activations"
     )
+    use_layernorm: bool = Field(
+        False, description="Add LayerNorm to shared trunk hidden layers"
+    )
+    soft_topk_temperature: float = Field(
+        0.0,
+        ge=0,
+        description="Soft top-k temperature (0=hard, >0=soft during training)",
+    )
+    soft_topk_anneal_steps: int = Field(
+        50000, ge=0, description="Steps to anneal soft top-k temp to near-zero"
+    )
 
 
 class ContextEncoderSchema(BaseModel):
@@ -43,6 +54,34 @@ class ContextEncoderSchema(BaseModel):
     )
     hidden_dims: list[int] = Field(default=[128, 128])
     context_lr: float = Field(1e-3, gt=0, description="Context encoder learning rate")
+
+
+class WorldModelLossSchema(BaseModel):
+    """World model loss and training stabilization configuration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    use_dim_weighting: bool = Field(
+        True, description="Enable per-dimension adaptive loss weighting"
+    )
+    dim_weight_ema_decay: float = Field(
+        0.99, ge=0.9, le=1.0, description="EMA decay for dimension weights"
+    )
+    identity_penalty_lambda: float = Field(
+        0.5, ge=0, description="Identity guard penalty weight (0=disabled)"
+    )
+    grad_clip_norm: float = Field(
+        1.0, gt=0, description="Gradient clip norm for encoder"
+    )
+    grad_clip_dict_norm: float = Field(
+        0.1, gt=0, description="Gradient clip norm for dictionary"
+    )
+    probabilistic: bool = Field(
+        False, description="Use probabilistic world model with per-atom variance"
+    )
+    uncertainty_penalty: float = Field(
+        1.0, ge=0, description="Pessimistic reward penalty coefficient (beta)"
+    )
 
 
 class DynaSchema(BaseModel):
@@ -62,6 +101,21 @@ class DynaSchema(BaseModel):
     )
     model_update_freq: int = Field(
         1, ge=1, description="Update world model every N real steps"
+    )
+    multistep_horizon: int = Field(
+        1, ge=1, le=10, description="Multi-step WM training horizon (1=single-step)"
+    )
+    multistep_discount: float = Field(
+        0.95, ge=0, le=1, description="Discount for multi-step error weighting"
+    )
+    teacher_forcing_ratio: float = Field(
+        0.5, ge=0, le=1, description="Teacher forcing ratio for multi-step training"
+    )
+    use_mve: bool = Field(
+        False, description="Use Model-Based Value Expansion instead of Dyna rollouts"
+    )
+    mve_horizon: int = Field(
+        3, ge=1, le=10, description="MVE horizon for value expansion"
     )
 
 
@@ -121,6 +175,7 @@ class TrainSchema(BaseModel):
     dictionary: DictionarySchema = DictionarySchema()
     encoder: SparseEncoderSchema = SparseEncoderSchema()
     context: ContextEncoderSchema = ContextEncoderSchema()
+    wm_loss: WorldModelLossSchema = WorldModelLossSchema()
     dyna: DynaSchema = DynaSchema()
     sac: SACSchema = SACSchema()
     reward: RewardSchema = RewardSchema()
