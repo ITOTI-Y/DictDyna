@@ -65,6 +65,7 @@ class OfflineCollector:
                 actions=data["actions"],
                 next_states=data["next_states"],
                 rewards=data["rewards"],
+                dones=data["dones"],
             )
             # Save state diffs (for dictionary pretraining)
             np.save(self.diffs_dir / f"{bid}_state_diffs.npy", data["diffs"])
@@ -85,7 +86,7 @@ class OfflineCollector:
 
     def _collect_building(self, env_name: str) -> dict[str, np.ndarray]:
         """Collect transitions from a single building."""
-        states, actions, next_states, rewards_list = [], [], [], []
+        states, actions, next_states, rewards_list, dones_list = [], [], [], [], []
 
         for ep in range(self.n_episodes):
             with sinergym_workdir():
@@ -103,13 +104,15 @@ class OfflineCollector:
 
                     next_obs, reward, terminated, truncated, _ = env.step(action)
 
+                    done = terminated or truncated
+
                     states.append(obs)
                     actions.append(action)
                     next_states.append(next_obs)
                     rewards_list.append(reward)
+                    dones_list.append(float(done))
 
                     obs = next_obs
-                    done = terminated or truncated
                     ep_steps += 1
                     ep_reward += float(reward)
 
@@ -126,6 +129,7 @@ class OfflineCollector:
             "actions": np.array(actions, dtype=np.float32),
             "next_states": next_states_arr,
             "rewards": np.array(rewards_list, dtype=np.float32),
+            "dones": np.array(dones_list, dtype=np.float32),
             "diffs": next_states_arr - states_arr,
         }
 

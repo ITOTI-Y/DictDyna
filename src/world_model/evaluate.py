@@ -13,15 +13,24 @@ from src.world_model.sparse_encoder import SparseEncoder
 
 
 def load_transitions(building_id: str, data_dir: str = "data/offline_rollouts"):
-    """Load raw transitions for a building."""
+    """Load raw transitions for a building.
+
+    Backward-compatible: if .npz lacks 'dones', returns None for that key.
+    """
     path = Path(data_dir) / f"{building_id}_transitions.npz"
     data = np.load(path)
-    return {
+    result = {
         "states": data["states"],
         "actions": data["actions"],
         "next_states": data["next_states"],
         "rewards": data["rewards"],
     }
+    if "dones" in data:
+        result["dones"] = data["dones"]
+    else:
+        logger.warning(f"{path.name}: no 'dones' key, episode boundaries unknown")
+        result["dones"] = None
+    return result
 
 
 def train_world_model(

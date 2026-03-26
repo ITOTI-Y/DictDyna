@@ -77,23 +77,56 @@ class ReplayBuffer:
         seq_len: int,
         device: torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Sample consecutive transition sequences for multi-step training.
+        """Sample consecutive transition sequences that don't cross episode boundaries.
+
+        A sequence [i, i+1, ..., i+seq_len-1] is valid only if dones[i] through
+        dones[i+seq_len-2] are all 0 (the last step may be terminal).
 
         Returns:
             Dict with keys: states, actions, next_states, dones.
             Each has shape (batch_size, seq_len, dim).
         """
         device = device or torch.device("cpu")
-        # Valid start indices: must have seq_len consecutive transitions
-        # Avoid crossing circular buffer boundary
-        max_start = self.size - seq_len
-        if max_start <= 0:
+        if self.size < seq_len:
             raise ValueError(f"Buffer size {self.size} too small for seq_len {seq_len}")
-        starts = np.random.randint(0, max_start, size=batch_size)
 
-        # Build index array: (batch_size, seq_len)
+        # Vectorized episode boundary detection via cumsum
+        # For start i, sequence covers [i, i+seq_len-1].
+        # Valid iff done_flags[i..i+seq_len-2] are all 0.
+        done_flags = (self.dones[: self.size].flatten() > 0.5).astype(np.float32)
+        if seq_len > 1:
+            window = seq_len - 1
+            cs = np.cumsum(np.concatenate([[0.0], done_flags]))
+            # window_sum[i] = sum(done_flags[i : i+window]) for i in [0, size-window]
+            n_windows = self.size - window + 1
+            window_sum = cs[window : window + n_windows] - cs[:n_windows]
+            valid_mask = np.zeros(self.size, dtype=bool)
+            valid_mask[:n_windows] = window_sum < 0.5
+        else:
+            valid_mask = np.ones(self.size, dtype=bool)
+
+        # Can't start a sequence in the last seq_len-1 positions
+        valid_mask[max(0, self.size - seq_len + 1) :] = False
+
+        # If buffer has wrapped, exclude sequences crossing the write pointer
+        if self.pos < self.size and self.pos > 0:
+            wrap_start = max(0, self.pos - seq_len + 1)
+            valid_mask[wrap_start : self.pos] = False
+
+        valid_starts = np.where(valid_mask)[0]
+        if len(valid_starts) == 0:
+            raise ValueError(
+                f"No valid sequences of length {seq_len} "
+                f"(buffer_size={self.size}, check episode boundaries)"
+            )
+
+        chosen = np.random.choice(
+            len(valid_starts), batch_size, replace=len(valid_starts) < batch_size
+        )
+        starts = valid_starts[chosen]
+
         offsets = np.arange(seq_len)
-        indices = starts[:, None] + offsets[None, :]  # (batch, seq_len)
+        indices = starts[:, None] + offsets[None, :]
 
         return {
             "states": torch.tensor(self.states[indices], device=device),

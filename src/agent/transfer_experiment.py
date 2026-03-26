@@ -202,7 +202,7 @@ class FewShotTransferExperiment:
         raw_obs, _ = env.reset(seed=self.seed + 100)
 
         raw_states, raw_next_states = [], []
-        states, actions, next_states, rewards_list = [], [], [], []
+        states, actions, next_states, rewards_list, dones_list = [], [], [], [], []
         done = False
         while not done:
             action = env.action_space.sample()
@@ -214,6 +214,7 @@ class FewShotTransferExperiment:
             actions.append(action)
             next_states.append(self._normalize(raw_next))
             rewards_list.append(float(reward))
+            dones_list.append(float(done))
             raw_obs = raw_next
 
         env.close()
@@ -224,6 +225,7 @@ class FewShotTransferExperiment:
             "actions": np.array(actions, dtype=np.float32),
             "next_states": np.array(next_states, dtype=np.float32),
             "rewards": np.array(rewards_list, dtype=np.float32),
+            "dones": np.array(dones_list, dtype=np.float32),
             "raw_states": np.array(raw_states, dtype=np.float32),
             "raw_next_states": np.array(raw_next_states, dtype=np.float32),
         }
@@ -298,14 +300,15 @@ class FewShotTransferExperiment:
         for param in dyna.world_model.parameters():
             param.requires_grad_(True)
 
-        # Step 2: Fill buffer with same sampled data
+        # Step 2: Fill buffer with same sampled data (use real done flags)
+        target_dones = target_data.get("dones")
         for i in indices:
             dyna.buffer.add_real(
                 target_data["states"][i],
                 target_data["actions"][i],
                 target_data["rewards"][i],
                 target_data["next_states"][i],
-                False,
+                bool(target_dones[i]) if target_dones is not None else False,
             )
 
         # SAC updates using real target data + model rollouts
@@ -437,14 +440,15 @@ class FewShotTransferExperiment:
             with torch.no_grad():
                 target_context = ctx_model.infer_context(transitions_t)
 
-        # Fill buffer with sampled target data
+        # Fill buffer with sampled target data (use real done flags)
+        target_dones = target_data.get("dones")
         for i in indices:
             dyna.buffer.add_real(
                 target_data["states"][i],
                 target_data["actions"][i],
                 target_data["rewards"][i],
                 target_data["next_states"][i],
-                False,
+                bool(target_dones[i]) if target_dones is not None else False,
             )
 
         # SAC updates with context-conditioned rollouts
@@ -522,14 +526,15 @@ class FewShotTransferExperiment:
             dyna.wm_trainer.optimizer.step()
             dyna.world_model.normalize_atoms()
 
-        # Fill buffer with same sampled data
+        # Fill buffer with same sampled data (use real done flags)
+        target_dones = target_data.get("dones")
         for i in indices:
             dyna.buffer.add_real(
                 target_data["states"][i],
                 target_data["actions"][i],
                 target_data["rewards"][i],
                 target_data["next_states"][i],
-                False,
+                bool(target_dones[i]) if target_dones is not None else False,
             )
 
         # SAC updates with rollouts (SAME as transfer for fairness)

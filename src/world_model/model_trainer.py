@@ -134,11 +134,13 @@ class WorldModelTrainer:
         building_id: str = "0",
         discount: float = 0.95,
         teacher_forcing_ratio: float = 0.5,
+        dones_seq: torch.Tensor | None = None,
     ) -> dict[str, float]:
-        """Multi-step consistency training with teacher forcing.
+        """Multi-step consistency training with teacher forcing and done masking.
 
         Trains on H-step rollouts, penalizing cumulative prediction drift.
-        Teacher forcing randomly replaces model predictions with ground truth.
+        Episode boundaries (done=True) mask out subsequent steps to prevent
+        learning spurious cross-episode transitions.
 
         Args:
             states_seq: Shape (batch, H, d) - consecutive states.
@@ -147,6 +149,8 @@ class WorldModelTrainer:
             building_id: Building identifier.
             discount: Discount for multi-step error (lambda^h).
             teacher_forcing_ratio: Probability of using true state as input.
+            dones_seq: Shape (batch, H, 1) or (batch, H) - episode terminals.
+                If provided, steps after done=True are masked from loss.
 
         Returns:
             Dict of training metrics.
@@ -154,21 +158,37 @@ class WorldModelTrainer:
         self.model.train()
         batch_size, horizon, _ = states_seq.shape
 
+        # Build active mask: once done=True at step h, mask steps h+1 onwards
+        if dones_seq is not None:
+            d = dones_seq.squeeze(-1) if dones_seq.dim() == 3 else dones_seq
+            cumulative_done = torch.cumsum((d > 0.5).float(), dim=1)
+            active_mask = torch.ones_like(cumulative_done)
+            active_mask[:, 1:] = (cumulative_done[:, :-1] < 0.5).float()
+        else:
+            active_mask = torch.ones(batch_size, horizon, device=states_seq.device)
+
         total_mse = torch.tensor(0.0, device=states_seq.device)
         current = states_seq[:, 0]  # (batch, d)
 
         for h in range(horizon):
             action = actions_seq[:, h]
             target = next_states_seq[:, h]
+            mask_h = active_mask[:, h]  # (batch,)
 
             pred, alpha = self.model(current, action, building_id)
-            step_mse = ((target - pred) ** 2).mean()
-            total_mse = total_mse + (discount**h) * step_mse
 
-            # Teacher forcing: use ground truth with probability p
+            # Per-sample MSE masked by episode activity
+            step_mse = ((target - pred) ** 2).mean(dim=-1)  # (batch,)
+            masked_mse = (step_mse * mask_h).sum() / (mask_h.sum() + 1e-8)
+            total_mse = total_mse + (discount**h) * masked_mse
+
+            # Teacher forcing: only on active (non-done) samples
             if h < horizon - 1:
                 use_teacher = torch.rand(batch_size, 1, device=pred.device)
-                current = torch.where(use_teacher < teacher_forcing_ratio, target, pred)
+                tf_mask = (use_teacher < teacher_forcing_ratio) & (
+                    mask_h.unsqueeze(-1) > 0.5
+                )
+                current = torch.where(tf_mask, target, pred)
 
         # Add sparsity from last step (representative)
         l1_loss = torch.mean(torch.abs(alpha))

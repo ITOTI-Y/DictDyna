@@ -232,9 +232,34 @@ class DynaSAC:
             )
             metrics.update({f"wm/{k}": v for k, v in wm_metrics.items()})
 
-            # Multi-step consistency training (if horizon > 1 and enough data)
-            ms_horizon = self.config.dyna.multistep_horizon
+            # Multi-step consistency training with curriculum + scheduled sampling
+            dyna_cfg = self.config.dyna
+            if dyna_cfg.multistep_curriculum:
+                # Curriculum: horizon increases with training progress
+                ms_horizon = dyna_cfg.multistep_curriculum_schedule[0]
+                for h_val, step_thresh in zip(
+                    dyna_cfg.multistep_curriculum_schedule,
+                    dyna_cfg.multistep_curriculum_steps,
+                    strict=False,
+                ):
+                    if global_step >= step_thresh:
+                        ms_horizon = h_val
+            else:
+                ms_horizon = dyna_cfg.multistep_horizon
+
             if ms_horizon > 1 and self.buffer.real_size > ms_horizon + 1:
+                # Scheduled sampling: teacher forcing decays over training
+                if dyna_cfg.scheduled_sampling_steps > 0:
+                    ss_progress = min(
+                        global_step / dyna_cfg.scheduled_sampling_steps, 1.0
+                    )
+                    tf_ratio = (
+                        dyna_cfg.scheduled_sampling_start * (1 - ss_progress)
+                        + dyna_cfg.scheduled_sampling_end * ss_progress
+                    )
+                else:
+                    tf_ratio = dyna_cfg.teacher_forcing_ratio
+
                 seq_batch = self.buffer.real_buffer.sample_sequence(
                     self.config.batch_size, ms_horizon, self.device
                 )
@@ -243,9 +268,11 @@ class DynaSAC:
                     seq_batch["actions"],
                     seq_batch["next_states"],
                     building_id=bid_idx,
-                    discount=self.config.dyna.multistep_discount,
-                    teacher_forcing_ratio=self.config.dyna.teacher_forcing_ratio,
+                    discount=dyna_cfg.multistep_discount,
+                    teacher_forcing_ratio=tf_ratio,
+                    dones_seq=seq_batch["dones"],
                 )
+                ms_metrics["multistep_tf_ratio"] = tf_ratio
                 metrics.update({f"wm/{k}": v for k, v in ms_metrics.items()})
 
         # 3. Model rollouts (only after warmup period)

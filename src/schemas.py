@@ -117,6 +117,26 @@ class DynaSchema(BaseModel):
     mve_horizon: int = Field(
         3, ge=1, le=10, description="MVE horizon for value expansion"
     )
+    multistep_curriculum: bool = Field(
+        False, description="Enable horizon curriculum: H increases during training"
+    )
+    multistep_curriculum_schedule: list[int] = Field(
+        default=[1, 2, 3, 5],
+        description="Horizon values at each curriculum stage",
+    )
+    multistep_curriculum_steps: list[int] = Field(
+        default=[0, 10000, 30000, 60000],
+        description="Global step thresholds for each curriculum stage",
+    )
+    scheduled_sampling_start: float = Field(
+        1.0, ge=0, le=1, description="Initial teacher forcing ratio"
+    )
+    scheduled_sampling_end: float = Field(
+        0.0, ge=0, le=1, description="Final teacher forcing ratio"
+    )
+    scheduled_sampling_steps: int = Field(
+        50000, ge=0, description="Steps to linearly decay teacher forcing"
+    )
 
 
 class SACSchema(BaseModel):
