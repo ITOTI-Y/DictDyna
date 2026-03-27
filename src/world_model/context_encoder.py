@@ -108,7 +108,7 @@ class ContextConditionedEncoder(nn.Module):
         shared_hidden_dims = shared_hidden_dims or [256, 256]
         act_fn = {"relu": nn.ReLU, "gelu": nn.GELU, "tanh": nn.Tanh}[activation]
 
-        # Trunk: (s, a, z) → hidden → n_atoms
+        # Shared trunk: (s, a, z) → hidden features
         layers: list[nn.Module] = []
         in_dim = state_dim + action_dim + context_dim
         for h in shared_hidden_dims:
@@ -117,8 +117,11 @@ class ContextConditionedEncoder(nn.Module):
                 layers.append(nn.LayerNorm(h))
             layers.append(act_fn())
             in_dim = h
-        layers.append(nn.Linear(in_dim, n_atoms))
-        self.trunk = nn.Sequential(*layers)
+        self.shared_trunk = nn.Sequential(*layers)
+        self.shared_output_dim = in_dim
+
+        # Output head: hidden → n_atoms
+        self.head = nn.Linear(in_dim, n_atoms)
 
     def forward(
         self,
@@ -137,7 +140,8 @@ class ContextConditionedEncoder(nn.Module):
             Sparse codes alpha, shape (batch, K).
         """
         x = torch.cat([state, action, context], dim=-1)
-        alpha = self.trunk(x)
+        h = self.shared_trunk(x)
+        alpha = self.head(h)
 
         if self.sparsity_method == "topk":
             alpha = self._topk_sparsify(alpha)

@@ -16,6 +16,7 @@ def _make_model(
     n_buildings: int = 2,
     sparsity_method: str = "l1_penalty",
     dim_weights: torch.Tensor | None = None,
+    residual_hidden_dim: int = 0,
 ):
     encoder = SparseEncoder(
         state_dim=STATE_DIM,
@@ -30,7 +31,11 @@ def _make_model(
     # Normalize columns
     dictionary = dictionary / dictionary.norm(dim=0, keepdim=True)
     model = DictDynamicsModel(
-        dictionary, encoder, learnable_dict=True, dim_weights=dim_weights
+        dictionary,
+        encoder,
+        learnable_dict=True,
+        dim_weights=dim_weights,
+        residual_hidden_dim=residual_hidden_dim,
     )
     return model
 
@@ -177,6 +182,70 @@ class TestDimWeightedLoss:
 
         assert "mse_reward_dims" not in metrics
         assert "mse_other_dims" not in metrics
+
+
+class TestResidualHead:
+    def test_residual_changes_prediction_after_training(self):
+        """After a gradient step, residual head should change predictions."""
+        model = _make_model(residual_hidden_dim=64)
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+
+        # At init: residual output is small (std=0.01 initialized)
+        _pred_before, _ = model(s, a)
+        assert model._last_residual is not None
+        init_norm = model._last_residual.norm().item()
+
+        # After one gradient step: residual changes
+        loss, _ = model.compute_loss(s, a, ns)
+        loss.backward()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+        opt.step()
+        _pred_after, _ = model(s, a)
+        post_norm = model._last_residual.norm().item()
+        assert post_norm != init_norm
+
+    def test_no_residual_backward_compat(self):
+        """residual_hidden_dim=0 produces same forward as original."""
+        model = _make_model()
+        assert model.residual_head is None
+        assert model._last_residual is None
+
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        pred, _alpha = model(s, a)
+        assert pred.shape == (BATCH_SIZE, STATE_DIM)
+        assert model._last_residual is None
+
+    def test_residual_norm_in_metrics(self):
+        """Metrics should include residual_norm when residual is active."""
+        model = _make_model(residual_hidden_dim=64)
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+        _, metrics = model.compute_loss(s, a, ns)
+
+        assert "residual_norm" in metrics
+        # Zero-initialized, so norm starts at 0
+        assert metrics["residual_norm"] >= 0
+
+    def test_residual_lambda_regularization(self):
+        """After training, residual L2 regularization should increase total loss."""
+        model = _make_model(residual_hidden_dim=64)
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+
+        # Train one step so residual becomes nonzero
+        loss, _ = model.compute_loss(s, a, ns)
+        loss.backward()
+        torch.optim.Adam(model.parameters(), lr=1e-2).step()
+
+        loss_no_reg, _ = model.compute_loss(s, a, ns, residual_lambda=0.0)
+        loss_with_reg, _ = model.compute_loss(s, a, ns, residual_lambda=1.0)
+
+        assert loss_with_reg > loss_no_reg
 
 
 class TestSinergymRewardEstimator:

@@ -531,6 +531,54 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - **U 型趋势**：w=5x/10x 反而更差，需足够大的权重才能有效聚焦 reward-critical 维度
 - **与 TD-error 加权正交**：sample-level (创新 2) + dimension-level (本创新) 可叠加
 
+#### F 组：WM 训练改进在线验证（单建筑 hot，seed=42，2026-03-27）
+
+**Feature 分支引入的改进**：GradClip（encoder 1.0 / dict 0.1）、LayerNorm、EMA 自适应维度加权、Identity Guard Penalty、Soft top-k 退火、Multi-step consistency、Probabilistic dynamics、Adaptive rollout horizon、MVE。
+
+**离线 WM 预测精度（office_hot，50 epochs）**：
+
+| 变体 | Total MSE | Non-trivial MSE | vs Baseline |
+|------|-----------|-----------------|-------------|
+| Baseline (无改进) | 0.03022 | 0.03952 | — |
+| **GradClip + LN** | **0.02873** | **0.03747** | **-5.2%** |
+| IdGuard only | 0.02923 | 0.03816 | -3.4% |
+| Full (EMA+Id+GC+LN) | 0.03100 | 0.03993 | +1.0% |
+
+**在线 Dyna-SAC 端到端验证**：
+
+| 配置 | Ep1 | Ep2 | Ep3 | vs Best |
+|------|-----|-----|-----|---------|
+| **Static w=20 + GradClip** | **-6462** | **-5326** | **-5173** | — |
+| EMA + identity (feature defaults) | -7054 | -5668 | -5388 | -4.2% |
+| EMA + identity + LN | -6683 | -5380 | -5253 | -1.5% |
+| Static w=20 + GradClip + LN | -7500 | -5758 | -5583 | -7.9% |
+
+**发现**：
+- **离线 vs 在线不一致**：GradClip+LN 降低离线 WM MSE 5.2%，但在线 RL 中 LayerNorm 反而有害（-7.9%）
+- 这是 MBRL 已知的 **WM 精度 ≠ RL 性能** 问题——WM 输出分布变化影响 SAC 策略交互
+- **GradClip 有正面贡献**（训练稳定性），EMA/Identity Guard/LayerNorm 在端到端 RL 中无正面效果
+- **最优在线配置**：`Static w=20 + GradClip`（`wm_loss.use_dim_weighting=false, dictionary.reward_dim_weight=20.0`）
+
+#### G 组：非线性残差修正头（单建筑 hot，seed=42，2026-03-27）
+
+**动机**：当前 `s' = s + D@α` 重构为纯线性，多维度 WM MSE ≈ identity MSE。添加 `residual_head(h)` 提供非线性修正能力：`s' = s + D@α + r(h)`。
+
+**迭代过程**：
+
+| 版本 | 激活 | output 初始化 | λ_res | Ep3 | res_norm | 问题 |
+|------|------|-------------|-------|-----|----------|------|
+| Baseline | — | — | — | **-5173** | — | — |
+| v1 | ReLU | Kaiming | 0.01 | -5844 | 1.4~5.9 | 初始噪声太大（norm≈6） |
+| v2 | ReLU | zeros | 0.10 | -5951 | 0.000 | ReLU 死区 + L2 压零 |
+| v3 | Tanh | zeros | 0.10 | -5775 | 0.000 | output W=0 → 输出恒零 |
+| **v4** | **Tanh** | **N(0,0.01)** | **0.01** | **-5150** | **0.22** | **追平 baseline** |
+
+**发现**：
+- **初始化极其敏感**：Kaiming 默认初始化 → norm≈6，严重扰乱 rollout；需 std=0.01 小初始化
+- **零初始化陷阱**：output layer 全零 + L2 正则 → residual 永远无法激活（无论 ReLU/Tanh）
+- **最终 v4 仅追平 baseline**（-5150 vs -5173），说明 17 维 obs 中 128 原子的稀疏线性组合已有足够表达力
+- **结论**：当前 Sinergym 5zone 场景下非线性残差修正无正面贡献，D@α 线性重构不是性能瓶颈
+
 ---
 
 ## 技术栈

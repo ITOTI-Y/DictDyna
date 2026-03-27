@@ -160,7 +160,7 @@ class SharedPrivateEncoder(nn.Module):
         self, building_id: str, adapter_dim: int = 64, n_private: int = 64
     ) -> None:
         """Add adapter for a new building."""
-        in_dim: int = self.trunk[-2].out_features  # type: ignore[assignment]
+        in_dim: int = self.trunk[-2].out_features  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
         self.adapters[building_id] = nn.Sequential(
             nn.Linear(in_dim, adapter_dim),
             nn.ReLU(),
@@ -204,6 +204,7 @@ class SharedPrivateWorldModel(nn.Module):
         topk_shared: int = 8,
         topk_private: int = 8,
         dim_weights: torch.Tensor | None = None,
+        residual_hidden_dim: int = 0,
     ) -> None:
         super().__init__()
         n_shared = shared_dict.shape[1]
@@ -236,6 +237,22 @@ class SharedPrivateWorldModel(nn.Module):
             topk_private=topk_private,
         )
 
+        # Nonlinear residual correction head (zero-initialized output layer)
+        hidden_dims = hidden_dims or [256, 256]
+        trunk_out_dim = hidden_dims[-1]
+        if residual_hidden_dim > 0:
+            out_layer = nn.Linear(residual_hidden_dim, state_dim)
+            nn.init.normal_(out_layer.weight, std=0.01)
+            nn.init.zeros_(out_layer.bias)
+            self.residual_head: nn.Module | None = nn.Sequential(
+                nn.Linear(trunk_out_dim, residual_hidden_dim),
+                nn.Tanh(),
+                out_layer,
+            )
+        else:
+            self.residual_head = None
+        self._last_residual: torch.Tensor | None = None
+
     def forward(
         self,
         state: torch.Tensor,
@@ -247,10 +264,26 @@ class SharedPrivateWorldModel(nn.Module):
         Returns:
             (next_state, alpha_combined) where alpha_combined = cat(shared, private)
         """
-        alpha_s, alpha_p = self.encoder(state, action, building_id)
+        # Direct trunk access for residual head
+        x = torch.cat([state, action], dim=-1)
+        h = self.encoder.trunk(x)
+        alpha_s = self.encoder._topk(
+            self.encoder.shared_head(h), self.encoder.topk_shared
+        )
+        alpha_p = self.encoder._topk(
+            self.encoder.adapters[building_id](h), self.encoder.topk_private
+        )
         delta = self.dynamics(alpha_s, alpha_p)
+
+        # Nonlinear residual correction
+        if self.residual_head is not None:
+            residual = self.residual_head(h)
+            delta = delta + residual
+            self._last_residual = residual
+        else:
+            self._last_residual = None
+
         next_state = state + delta
-        # Concat for compatibility with rollout.py (expects single alpha)
         alpha = torch.cat([alpha_s, alpha_p], dim=-1)
         return next_state, alpha
 
@@ -274,11 +307,14 @@ class SharedPrivateWorldModel(nn.Module):
         identity_penalty_lambda: float = 0.0,
         dim_weight_ema_decay: float = 0.99,
         use_dim_weighting: bool = False,
+        residual_lambda: float = 0.0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute loss with separate sparsity for shared/private."""
-        alpha_s, alpha_p = self.encoder(state, action, building_id)
-        delta = self.dynamics(alpha_s, alpha_p)
-        pred = state + delta
+        # Use forward() which handles residual internally
+        pred, alpha_combined = self.forward(state, action, building_id)
+        n_shared = self.dynamics.n_shared
+        alpha_s = alpha_combined[:, :n_shared]
+        alpha_p = alpha_combined[:, n_shared:]
 
         if use_dim_weighting or identity_penalty_lambda > 0:
             mse_loss, extra = compute_dim_weighted_mse(
@@ -306,6 +342,10 @@ class SharedPrivateWorldModel(nn.Module):
         l1_private = torch.mean(torch.abs(alpha_p))
         total_loss = mse_loss + sparsity_lambda * (l1_shared + l1_private)
 
+        # Residual L2 regularization
+        if self._last_residual is not None and residual_lambda > 0:
+            total_loss = total_loss + residual_lambda * (self._last_residual**2).mean()
+
         sparsity_s = (alpha_s.abs() < 1e-6).float().mean().item()
         sparsity_p = (alpha_p.abs() < 1e-6).float().mean().item()
 
@@ -323,6 +363,8 @@ class SharedPrivateWorldModel(nn.Module):
             reward_mask = self.dim_weights > 1.0
             metrics["mse_reward_dims"] = raw_sq_err[:, reward_mask].mean().item()
             metrics["mse_other_dims"] = raw_sq_err[:, ~reward_mask].mean().item()
+        if self._last_residual is not None:
+            metrics["residual_norm"] = self._last_residual.norm(dim=-1).mean().item()
 
         return total_loss, metrics
 

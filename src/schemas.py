@@ -89,6 +89,12 @@ class WorldModelLossSchema(BaseModel):
     uncertainty_penalty: float = Field(
         1.0, ge=0, description="Pessimistic reward penalty coefficient (beta)"
     )
+    residual_hidden_dim: int = Field(
+        128, ge=0, description="Residual correction head hidden dim (0=disabled)"
+    )
+    residual_lambda: float = Field(
+        0.01, ge=0, description="L2 regularization on residual output (0=disabled)"
+    )
 
 
 class DynaSchema(BaseModel):

@@ -133,6 +133,7 @@ class MultiBuildingDynaSAC:
                 topk_shared=config.encoder.topk_k // 2,
                 topk_private=config.encoder.topk_k // 2,
                 dim_weights=self._dim_weights,
+                residual_hidden_dim=config.wm_loss.residual_hidden_dim,
             ).to(self.device)
             # Replace DynaSAC's world model and trainer
             self.dyna.world_model = sp_model
@@ -146,12 +147,13 @@ class MultiBuildingDynaSAC:
                 identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
                 dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
                 use_dim_weighting=config.wm_loss.use_dim_weighting,
+                residual_lambda=config.wm_loss.residual_lambda,
             )
             # Update rollout generator
             from src.agent.rollout import ModelRollout
 
             self.dyna.rollout_gen = ModelRollout(
-                world_model=sp_model,  # ty: ignore[invalid-argument-type]
+                world_model=sp_model,
                 actor=self.dyna.actor,
                 reward_estimator=self.dyna.reward_estimator,
                 exploration=self.dyna.exploration,
@@ -209,6 +211,7 @@ class MultiBuildingDynaSAC:
                 sparse_encoder=encoder,
                 learnable_dict=True,  # must learn from scratch
                 dim_weights=self._dim_weights,
+                residual_hidden_dim=config.wm_loss.residual_hidden_dim,
             ).to(self.device)
 
             trainer = WorldModelTrainer(
@@ -221,6 +224,7 @@ class MultiBuildingDynaSAC:
                 identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
                 dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
                 use_dim_weighting=config.wm_loss.use_dim_weighting,
+                residual_lambda=config.wm_loss.residual_lambda,
             )
 
             rollout = ModelRollout(
@@ -280,6 +284,7 @@ class MultiBuildingDynaSAC:
             conditioned_encoder=conditioned_encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
             dim_weights=self._dim_weights,
+            residual_hidden_dim=config.wm_loss.residual_hidden_dim,
         ).to(self.device)
 
         # Replace DynaSAC's world model and trainer
@@ -297,7 +302,7 @@ class MultiBuildingDynaSAC:
             use_dim_weighting=config.wm_loss.use_dim_weighting,
         )
         self.dyna.rollout_gen = ModelRollout(
-            world_model=ctx_model,  # type: ignore[arg-type]
+            world_model=ctx_model,
             actor=self.dyna.actor,
             reward_estimator=self.dyna.reward_estimator,
             exploration=self.dyna.exploration,
@@ -339,7 +344,7 @@ class MultiBuildingDynaSAC:
             transitions = torch.cat([pad, transitions], dim=1)
 
         with torch.no_grad():
-            return self.dyna.world_model.infer_context(transitions)  # type: ignore[union-attr]
+            return self.dyna.world_model.infer_context(transitions)  # type: ignore[union-attr]  # ty: ignore[call-non-callable]
 
     def _update_context_window(
         self, bid: str, obs: np.ndarray, action: np.ndarray, next_obs: np.ndarray

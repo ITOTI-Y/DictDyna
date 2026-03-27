@@ -2,10 +2,10 @@
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from src.agent.sac import GaussianActor, SoftQNetwork
 from src.agent.sparse_exploration import SparseCodeExploration
-from src.world_model.dict_dynamics import DictDynamicsModel
 from src.world_model.reward_estimator import SinergymRewardEstimator
 
 
@@ -27,7 +27,7 @@ class ModelRollout:
 
     def __init__(
         self,
-        world_model: DictDynamicsModel,
+        world_model: nn.Module,
         actor: GaussianActor,
         reward_estimator: SinergymRewardEstimator,
         exploration: SparseCodeExploration | None = None,

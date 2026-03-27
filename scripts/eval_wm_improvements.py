@@ -127,8 +127,8 @@ def train_and_evaluate(
     model.eval()
     with torch.no_grad():
         pred, _ = model(test_s, test_a)
-        per_dim_mse = ((test_ns - pred) ** 2).mean(dim=0).numpy()
-        identity_mse = ((test_ns - test_s) ** 2).mean(dim=0).numpy()
+        per_dim_mse = ((test_ns - pred) ** 2).mean(dim=0).cpu().numpy()
+        identity_mse = ((test_ns - test_s) ** 2).mean(dim=0).cpu().numpy()
 
     return {
         "per_dim_mse": per_dim_mse,

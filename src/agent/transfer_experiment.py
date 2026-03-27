@@ -381,6 +381,7 @@ class FewShotTransferExperiment:
             conditioned_encoder=cond_enc,
             learnable_dict=True,
             dim_weights=dim_weights,
+            residual_hidden_dim=self.config.wm_loss.residual_hidden_dim,
         ).to(self.device)
 
         # Replace DynaSAC's world model and rollout gen
@@ -388,7 +389,7 @@ class FewShotTransferExperiment:
         from src.agent.rollout import ModelRollout
 
         dyna.rollout_gen = ModelRollout(
-            world_model=ctx_model,  # type: ignore[arg-type]
+            world_model=ctx_model,
             actor=dyna.actor,
             reward_estimator=dyna.reward_estimator,
             exploration=dyna.exploration,

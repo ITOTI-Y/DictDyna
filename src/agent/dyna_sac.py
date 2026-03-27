@@ -84,6 +84,7 @@ class DynaSAC:
             sparse_encoder=self.encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
             dim_weights=dim_weights,
+            residual_hidden_dim=config.wm_loss.residual_hidden_dim,
         ).to(self.device)
 
         # Build reward estimator (denormalizes predicted states for reward calc)
@@ -140,6 +141,7 @@ class DynaSAC:
             identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
             dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
             use_dim_weighting=config.wm_loss.use_dim_weighting,
+            residual_lambda=config.wm_loss.residual_lambda,
         )
 
         # Build sparse-code exploration module

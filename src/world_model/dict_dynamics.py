@@ -16,7 +16,7 @@ class DictDynamicsModel(nn.Module):
     """Dictionary-based transition dynamics model with space conversion.
 
     Supports two modes:
-    1. Raw mode (no conversion): s' = s + D @ alpha
+    1. Raw mode (no conversion): s' = s + D @ alpha + residual(h)
     2. Normalized mode: policy in obs-norm, dict in diff-norm, with conversion
 
     Args:
@@ -26,6 +26,8 @@ class DictDynamicsModel(nn.Module):
         diff_mean: Mean of state diffs (for space conversion).
         diff_std: Std of state diffs (for space conversion).
         obs_std: Std of observations (for space conversion).
+        dim_weights: Static per-dimension loss weights.
+        residual_hidden_dim: Residual correction head hidden dim (0=disabled).
     """
 
     def __init__(
@@ -37,6 +39,7 @@ class DictDynamicsModel(nn.Module):
         diff_std: torch.Tensor | None = None,
         obs_std: torch.Tensor | None = None,
         dim_weights: torch.Tensor | None = None,
+        residual_hidden_dim: int = 0,
     ) -> None:
         super().__init__()
         self.encoder = sparse_encoder
@@ -53,10 +56,8 @@ class DictDynamicsModel(nn.Module):
         self._has_conversion = diff_std is not None and obs_std is not None
         if self._has_conversion:
             assert diff_std is not None and obs_std is not None
-            # scale converts diff-norm space to obs-norm space: diff_std / obs_std
             scale = diff_std / obs_std
             self.register_buffer("_scale", scale)
-            # bias accounts for diff_mean in obs-norm space: diff_mean / obs_std
             bias = (
                 diff_mean / obs_std
                 if diff_mean is not None
@@ -69,6 +70,20 @@ class DictDynamicsModel(nn.Module):
             self.register_buffer("dim_weights", dim_weights)
         else:
             self.dim_weights: torch.Tensor | None = None
+
+        # Nonlinear residual correction head (zero-initialized output layer)
+        if residual_hidden_dim > 0:
+            out_layer = nn.Linear(residual_hidden_dim, dictionary.shape[0])
+            nn.init.normal_(out_layer.weight, std=0.01)
+            nn.init.zeros_(out_layer.bias)
+            self.residual_head: nn.Module | None = nn.Sequential(
+                nn.Linear(sparse_encoder.shared_output_dim, residual_hidden_dim),
+                nn.Tanh(),
+                out_layer,
+            )
+        else:
+            self.residual_head = None
+        self._last_residual: torch.Tensor | None = None
 
     @property
     def n_atoms(self) -> int:
@@ -86,11 +101,6 @@ class DictDynamicsModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Predict next state.
 
-        If space conversion is enabled:
-          delta_diff_norm = D @ alpha          (in diff-norm space)
-          delta_obs_norm = delta * scale + bias (convert to obs-norm space)
-          s'_obs_norm = s_obs_norm + delta_obs_norm
-
         Args:
             state: Current states (obs-normalized if conversion enabled).
             action: Actions (always in raw action space).
@@ -99,11 +109,25 @@ class DictDynamicsModel(nn.Module):
         Returns:
             (predicted_next_state, alpha)
         """
-        alpha = self.encoder(state, action, building_id)
+        # Direct trunk access (same pattern as ProbabilisticDictDynamics)
+        x = torch.cat([state, action], dim=-1)
+        h = self.encoder.shared_trunk(x)
+        alpha = self.encoder.adapters[building_id](h)
+        if self.encoder.sparsity_method == "topk":
+            alpha = self.encoder._topk_sparsify(alpha)
+
         delta = alpha @ self.dictionary.T
+
+        # Nonlinear residual correction
+        if self.residual_head is not None:
+            residual = self.residual_head(h)
+            delta = delta + residual
+            self._last_residual = residual
+        else:
+            self._last_residual = None
+
         if self._has_conversion:
-            # Convert from diff-norm to obs-norm space
-            delta = delta * self._scale + self._bias
+            delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
         next_state = state + delta
         return next_state, alpha
 
@@ -135,14 +159,16 @@ class DictDynamicsModel(nn.Module):
         identity_penalty_lambda: float = 0.0,
         dim_weight_ema_decay: float = 0.99,
         use_dim_weighting: bool = False,
+        residual_lambda: float = 0.0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute world model loss: weighted MSE + lambda * L1.
+        """Compute world model loss: weighted MSE + lambda * L1 + residual L2.
 
         Args:
             sample_weights: Per-sample importance weights, shape (batch,).
             identity_penalty_lambda: Penalty for being worse than identity.
             dim_weight_ema_decay: EMA decay for per-dimension weights.
             use_dim_weighting: Enable per-dimension adaptive weighting.
+            residual_lambda: L2 regularization weight on residual output.
         """
         pred_next, alpha = self.forward(state, action, building_id)
 
@@ -171,6 +197,10 @@ class DictDynamicsModel(nn.Module):
         l1_loss = torch.mean(torch.abs(alpha))
         total_loss = mse_loss + sparsity_lambda * l1_loss
 
+        # Residual L2 regularization
+        if self._last_residual is not None and residual_lambda > 0:
+            total_loss = total_loss + residual_lambda * (self._last_residual**2).mean()
+
         sparsity = (alpha.abs() < 1e-6).float().mean().item()
 
         metrics: dict[str, float] = {
@@ -185,5 +215,7 @@ class DictDynamicsModel(nn.Module):
             reward_mask = self.dim_weights > 1.0
             metrics["mse_reward_dims"] = raw_sq_err[:, reward_mask].mean().item()
             metrics["mse_other_dims"] = raw_sq_err[:, ~reward_mask].mean().item()
+        if self._last_residual is not None:
+            metrics["residual_norm"] = self._last_residual.norm(dim=-1).mean().item()
 
         return total_loss, metrics

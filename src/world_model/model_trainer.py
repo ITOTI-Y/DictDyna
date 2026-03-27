@@ -32,6 +32,7 @@ class WorldModelTrainer:
         identity_penalty_lambda: float = 0.0,
         dim_weight_ema_decay: float = 0.99,
         use_dim_weighting: bool = False,
+        residual_lambda: float = 0.0,
     ) -> None:
         self.model = model
         self.sparsity_lambda = sparsity_lambda
@@ -40,6 +41,7 @@ class WorldModelTrainer:
         self.identity_penalty_lambda = identity_penalty_lambda
         self.dim_weight_ema_decay = dim_weight_ema_decay
         self.use_dim_weighting = use_dim_weighting
+        self.residual_lambda = residual_lambda
 
         # Separate parameter groups for encoder and dictionary
         self._encoder_params = list(model.encoder.parameters())
@@ -82,6 +84,7 @@ class WorldModelTrainer:
             identity_penalty_lambda=self.identity_penalty_lambda,
             dim_weight_ema_decay=self.dim_weight_ema_decay,
             use_dim_weighting=self.use_dim_weighting,
+            residual_lambda=self.residual_lambda,
         )
 
         self.optimizer.zero_grad()
@@ -236,6 +239,7 @@ class ContextWorldModelTrainer:
         identity_penalty_lambda: float = 0.0,
         dim_weight_ema_decay: float = 0.99,
         use_dim_weighting: bool = False,
+        residual_lambda: float = 0.0,
     ) -> None:
         self.model = model
         self.sparsity_lambda = sparsity_lambda
@@ -244,6 +248,7 @@ class ContextWorldModelTrainer:
         self.identity_penalty_lambda = identity_penalty_lambda
         self.dim_weight_ema_decay = dim_weight_ema_decay
         self.use_dim_weighting = use_dim_weighting
+        self.residual_lambda = residual_lambda
 
         self._encoder_params = list(model.encoder.parameters()) + list(
             model.context_encoder.parameters()
@@ -288,6 +293,7 @@ class ContextWorldModelTrainer:
             identity_penalty_lambda=self.identity_penalty_lambda,
             dim_weight_ema_decay=self.dim_weight_ema_decay,
             use_dim_weighting=self.use_dim_weighting,
+            residual_lambda=self.residual_lambda,
         )
 
         self.optimizer.zero_grad()

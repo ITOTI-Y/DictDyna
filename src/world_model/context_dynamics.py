@@ -4,7 +4,7 @@ Replaces DictDynamicsModel's adapter-based routing with continuous context
 conditioning. The context vector z is inferred by ContextEncoder and fed
 to ContextConditionedEncoder alongside (s, a).
 
-Core equation: s_hat' = s + D * alpha(s, a, z)
+Core equation: s_hat' = s + D * alpha(s, a, z) + residual(h)
 """
 
 import torch
@@ -25,6 +25,8 @@ class ContextDynamicsModel(nn.Module):
         diff_std: Diff-space std for space conversion (optional).
         obs_std: Obs-space std for space conversion (optional).
         diff_mean: Diff-space mean for space conversion (optional).
+        dim_weights: Static per-dimension loss weights.
+        residual_hidden_dim: Residual correction head hidden dim (0=disabled).
     """
 
     def __init__(
@@ -37,6 +39,7 @@ class ContextDynamicsModel(nn.Module):
         diff_std: torch.Tensor | None = None,
         obs_std: torch.Tensor | None = None,
         dim_weights: torch.Tensor | None = None,
+        residual_hidden_dim: int = 0,
     ) -> None:
         super().__init__()
         self.context_encoder = context_encoder
@@ -68,6 +71,20 @@ class ContextDynamicsModel(nn.Module):
             self.register_buffer("dim_weights", dim_weights)
         else:
             self.dim_weights: torch.Tensor | None = None
+
+        # Nonlinear residual correction head (zero-initialized output layer)
+        if residual_hidden_dim > 0:
+            out_layer = nn.Linear(residual_hidden_dim, dictionary.shape[0])
+            nn.init.normal_(out_layer.weight, std=0.01)
+            nn.init.zeros_(out_layer.bias)
+            self.residual_head: nn.Module | None = nn.Sequential(
+                nn.Linear(conditioned_encoder.shared_output_dim, residual_hidden_dim),
+                nn.Tanh(),
+                out_layer,
+            )
+        else:
+            self.residual_head = None
+        self._last_residual: torch.Tensor | None = None
 
     @property
     def n_atoms(self) -> int:
@@ -104,11 +121,25 @@ class ContextDynamicsModel(nn.Module):
         Returns:
             (predicted_next_state, alpha)
         """
-        alpha = self.encoder(state, action, context)
+        # Direct trunk access for residual head
+        x = torch.cat([state, action, context], dim=-1)
+        h = self.encoder.shared_trunk(x)
+        alpha = self.encoder.head(h)
+        if self.encoder.sparsity_method == "topk":
+            alpha = self.encoder._topk_sparsify(alpha)
+
         delta = alpha @ self.dictionary.T
 
+        # Nonlinear residual correction
+        if self.residual_head is not None:
+            residual = self.residual_head(h)
+            delta = delta + residual
+            self._last_residual = residual
+        else:
+            self._last_residual = None
+
         if self._has_conversion:
-            delta = delta * self._scale + self._bias
+            delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
 
         next_state = state + delta
         return next_state, alpha
@@ -141,6 +172,7 @@ class ContextDynamicsModel(nn.Module):
         identity_penalty_lambda: float = 0.0,
         dim_weight_ema_decay: float = 0.99,
         use_dim_weighting: bool = False,
+        residual_lambda: float = 0.0,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute prediction loss.
 
@@ -154,6 +186,7 @@ class ContextDynamicsModel(nn.Module):
             identity_penalty_lambda: Penalty for being worse than identity.
             dim_weight_ema_decay: EMA decay for per-dimension weights.
             use_dim_weighting: Enable per-dimension adaptive weighting.
+            residual_lambda: L2 regularization weight on residual output.
 
         Returns:
             (total_loss, metrics_dict)
@@ -185,6 +218,10 @@ class ContextDynamicsModel(nn.Module):
         l1_loss = torch.mean(torch.abs(alpha))
         total_loss = mse_loss + sparsity_lambda * l1_loss
 
+        # Residual L2 regularization
+        if self._last_residual is not None and residual_lambda > 0:
+            total_loss = total_loss + residual_lambda * (self._last_residual**2).mean()
+
         sparsity = (alpha.abs() < 1e-6).float().mean().item()
 
         metrics: dict[str, float] = {
@@ -199,5 +236,7 @@ class ContextDynamicsModel(nn.Module):
             reward_mask = self.dim_weights > 1.0
             metrics["mse_reward_dims"] = raw_sq_err[:, reward_mask].mean().item()
             metrics["mse_other_dims"] = raw_sq_err[:, ~reward_mask].mean().item()
+        if self._last_residual is not None:
+            metrics["residual_norm"] = self._last_residual.norm(dim=-1).mean().item()
 
         return total_loss, metrics
