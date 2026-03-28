@@ -2,7 +2,11 @@
 
 import torch
 
+from src.schemas import TrainSchema
+from src.world_model.context_dynamics import ContextDynamicsModel
+from src.world_model.context_encoder import ContextConditionedEncoder, ContextEncoder
 from src.world_model.dict_dynamics import DictDynamicsModel
+from src.world_model.factory import build_trainer, build_world_model
 from src.world_model.reward_estimator import SinergymRewardEstimator
 from src.world_model.sparse_encoder import SparseEncoder
 
@@ -10,6 +14,7 @@ STATE_DIM = 10
 ACTION_DIM = 2
 N_ATOMS = 32
 BATCH_SIZE = 16
+CONTEXT_DIM = 8
 
 
 def _make_model(
@@ -112,8 +117,8 @@ class TestDictDynamicsModel:
 
         loss, metrics = model.compute_loss(s, a, s_next, building_id="0")
         assert loss.requires_grad
-        assert "mse_loss" in metrics
-        assert "l1_loss" in metrics
+        assert "mse" in metrics
+        assert "l1" in metrics
         assert "sparsity" in metrics
 
     def test_predict(self):
@@ -279,3 +284,111 @@ class TestSinergymRewardEstimator:
         # R = -0.5 * 1.0 * 3.0 = -1.5
         expected = -(0.5 * 1.0 * 3.0)
         torch.testing.assert_close(reward, torch.tensor([expected]))
+
+
+def _make_context_model(residual_hidden_dim: int = 0):
+    dictionary = torch.randn(STATE_DIM, N_ATOMS)
+    dictionary = dictionary / dictionary.norm(dim=0, keepdim=True)
+    ctx_enc = ContextEncoder(STATE_DIM, ACTION_DIM, CONTEXT_DIM)
+    cond_enc = ContextConditionedEncoder(
+        STATE_DIM,
+        ACTION_DIM,
+        CONTEXT_DIM,
+        N_ATOMS,
+        sparsity_method="topk",
+        topk_k=8,
+    )
+    return ContextDynamicsModel(
+        dictionary,
+        ctx_enc,
+        cond_enc,
+        residual_hidden_dim=residual_hidden_dim,
+    )
+
+
+class TestContextDynamicsModel:
+    def test_forward_shape(self):
+        model = _make_context_model()
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        z = torch.randn(BATCH_SIZE, CONTEXT_DIM)
+        pred, alpha = model(s, a, context=z)
+        assert pred.shape == (BATCH_SIZE, STATE_DIM)
+        assert alpha.shape == (BATCH_SIZE, N_ATOMS)
+
+    def test_infer_context(self):
+        model = _make_context_model()
+        trans_dim = 2 * STATE_DIM + ACTION_DIM
+        transitions = torch.randn(BATCH_SIZE, 5, trans_dim)
+        z = model.infer_context(transitions)
+        assert z.shape == (BATCH_SIZE, CONTEXT_DIM)
+
+    def test_compute_loss(self):
+        model = _make_context_model()
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        ns = torch.randn(BATCH_SIZE, STATE_DIM)
+        z = torch.randn(BATCH_SIZE, CONTEXT_DIM)
+        loss, metrics = model.compute_loss(s, a, ns, context=z)
+        assert loss.requires_grad
+        assert "mse" in metrics
+        assert "sparsity" in metrics
+
+    def test_predict(self):
+        model = _make_context_model()
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        z = torch.randn(BATCH_SIZE, CONTEXT_DIM)
+        pred = model.predict(s, a, context=z)
+        assert pred.shape == (BATCH_SIZE, STATE_DIM)
+
+    def test_residual_head(self):
+        model = _make_context_model(residual_hidden_dim=32)
+        s = torch.randn(BATCH_SIZE, STATE_DIM)
+        a = torch.randn(BATCH_SIZE, ACTION_DIM)
+        z = torch.randn(BATCH_SIZE, CONTEXT_DIM)
+        _, metrics = model.compute_loss(s, a, s, context=z)
+        assert "residual_norm" in metrics
+
+
+class TestFactory:
+    def test_build_dict_model(self):
+        dictionary = torch.randn(STATE_DIM, N_ATOMS)
+        config = TrainSchema(mode="dict")
+        model = build_world_model(
+            dictionary,
+            STATE_DIM,
+            ACTION_DIM,
+            config,
+            torch.device("cpu"),
+        )
+        assert isinstance(model, DictDynamicsModel)
+
+    def test_build_context_model(self):
+        dictionary = torch.randn(STATE_DIM, N_ATOMS)
+        config = TrainSchema(mode="context")
+        model = build_world_model(
+            dictionary,
+            STATE_DIM,
+            ACTION_DIM,
+            config,
+            torch.device("cpu"),
+        )
+        assert isinstance(model, ContextDynamicsModel)
+
+    def test_build_trainer(self):
+        dictionary = torch.randn(STATE_DIM, N_ATOMS)
+        config = TrainSchema(mode="dict")
+        model = build_world_model(
+            dictionary,
+            STATE_DIM,
+            ACTION_DIM,
+            config,
+            torch.device("cpu"),
+        )
+        trainer = build_trainer(model, config)
+        assert trainer.model is model
+
+    def test_default_mode_is_context(self):
+        config = TrainSchema()
+        assert config.mode == "context"

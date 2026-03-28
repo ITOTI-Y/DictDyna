@@ -3,7 +3,6 @@
 Covers:
 - world_model/_share.py: apply_space_conversion, topk_sparsify, normalize_atoms, build_residual_head
 - agent/_share.py: normalize_obs, compute_td_error_weights
-- SharedPrivateWorldModel with controllable_dims
 - evaluate() deque-based mean/std
 """
 
@@ -88,95 +87,7 @@ class TestApplySpaceConversion:
 
 
 # ---------------------------------------------------------------------------
-# Gap 2: SharedPrivateWorldModel with controllable_dims
-# ---------------------------------------------------------------------------
-class TestSharedPrivateControllableDims:
-    def _make_model(self, controllable_dims=None, diff_std=None, obs_std=None):
-        from src.world_model.shared_private_dynamics import SharedPrivateWorldModel
-
-        state_dim = 8
-        action_dim = 2
-        n_shared = 16
-        shared_dict = torch.randn(state_dim, n_shared)
-        shared_dict = shared_dict / shared_dict.norm(dim=0, keepdim=True)
-
-        return SharedPrivateWorldModel(
-            shared_dict=shared_dict,
-            n_private_atoms=8,
-            state_dim=state_dim,
-            action_dim=action_dim,
-            hidden_dims=[32, 32],
-            adapter_dim=16,
-            n_buildings=1,
-            topk_shared=4,
-            topk_private=4,
-            controllable_dims=controllable_dims,
-            diff_std=diff_std,
-            obs_std=obs_std,
-        )
-
-    def test_forward_without_controllable(self):
-        model = self._make_model()
-        state = torch.randn(4, 8)
-        action = torch.randn(4, 2)
-        next_state, _alpha = model(state, action)
-        assert next_state.shape == (4, 8)
-
-    def test_forward_with_controllable(self):
-        ctrl = (1, 3, 5)
-        model = self._make_model(controllable_dims=ctrl)
-        state = torch.randn(4, 8)
-        action = torch.randn(4, 2)
-        next_state, _alpha = model(state, action)
-        assert next_state.shape == (4, 8)
-        # Non-controllable dims should equal state (delta=0 for those)
-        for d in range(8):
-            if d not in ctrl:
-                torch.testing.assert_close(next_state[:, d], state[:, d])
-
-    def test_forward_with_controllable_and_conversion(self):
-        ctrl = (1, 3, 5)
-        state_dim = 8  # must match _make_model's state_dim
-        # SharedPrivateWorldModel uses full-dim dict, so scale/bias are full-dim
-        diff_std = torch.ones(state_dim) * 0.5
-        obs_std = torch.ones(state_dim) * 1.0
-        model = self._make_model(
-            controllable_dims=ctrl, diff_std=diff_std, obs_std=obs_std
-        )
-        state = torch.randn(4, 8)
-        action = torch.randn(4, 2)
-        next_state, _alpha = model(state, action)
-        assert next_state.shape == (4, 8)
-
-    def test_compute_loss_controllable_only(self):
-        """Loss should only account for controllable dims."""
-        ctrl = (0, 2)
-        model = self._make_model(controllable_dims=ctrl)
-        state = torch.randn(4, 8)
-        action = torch.randn(4, 2)
-        next_state = torch.randn(4, 8)
-
-        loss, _metrics = model.compute_loss(state, action, next_state)
-        assert loss.requires_grad
-        # Backward should succeed
-        loss.backward()
-        # Private dict should have gradient
-        assert model.dynamics.private_dict.grad is not None
-
-    def test_compute_loss_no_controllable(self):
-        """Without controllable_dims, all dims contribute to loss."""
-        model = self._make_model()
-        state = torch.randn(4, 8)
-        action = torch.randn(4, 2)
-        next_state = torch.randn(4, 8)
-
-        loss, metrics = model.compute_loss(state, action, next_state)
-        loss.backward()
-        assert "mse_loss" in metrics
-
-
-# ---------------------------------------------------------------------------
-# Gap 3: evaluate() with deque-based mean/std
+# Gap 2: evaluate() with deque-based mean/std
 # ---------------------------------------------------------------------------
 class TestEvaluateDeque:
     def test_empty_deque_returns_zero(self):

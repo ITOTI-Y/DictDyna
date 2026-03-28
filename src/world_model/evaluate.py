@@ -166,7 +166,7 @@ def train_world_model(
                     td["next_states"][idx],
                     building_id=str(i),
                 )
-                total_loss += metrics["total_loss"]
+                total_loss += metrics["loss"]
                 n_batches += 1
             epoch_metrics[f"{bid}_train_loss"] = total_loss / max(n_batches, 1)
 
@@ -176,7 +176,7 @@ def train_world_model(
             test_metrics = trainer.evaluate(
                 td["states"], td["actions"], td["next_states"], building_id=str(i)
             )
-            epoch_metrics[f"{bid}_test_mse"] = test_metrics["mse_loss"]
+            epoch_metrics[f"{bid}_test_mse"] = test_metrics["mse"]
             epoch_metrics[f"{bid}_test_sparsity"] = test_metrics["sparsity"]
 
         history.append(epoch_metrics)
@@ -236,7 +236,7 @@ def evaluate_multistep(
                     actions[idx + step], dtype=torch.float32, device=dev
                 ).unsqueeze(0)
                 with torch.no_grad():
-                    s = model.predict(s, a, building_idx)
+                    s = model.predict(s, a, building_id=building_idx)
             # Compare with actual state at idx+h
             actual = normalize(next_states[idx + h - 1])
             pred = s.cpu().numpy().squeeze(0)

@@ -13,15 +13,12 @@ class ModelRollout:
     """Generate simulated rollouts using the world model.
 
     Optionally adds sparse-code exploration bonus to rollout rewards.
-    Supports uncertainty-aware pessimistic reward for probabilistic models.
 
     Args:
-        world_model: DictDynamicsModel or ProbabilisticDictDynamics instance.
+        world_model: BaseDictDynamics instance (DictDynamicsModel or ContextDynamicsModel).
         actor: GaussianActor policy for action selection.
         reward_estimator: Reward estimator from predicted states.
         exploration: SparseCodeExploration for intrinsic reward bonus.
-        uncertainty_penalty: Coefficient for pessimistic reward (beta).
-            Reward is adjusted: r_adj = r - beta * mean(pred_std).
         device: Torch device.
     """
 
@@ -31,14 +28,12 @@ class ModelRollout:
         actor: GaussianActor,
         reward_estimator: SinergymRewardEstimator,
         exploration: SparseCodeExploration | None = None,
-        uncertainty_penalty: float = 0.0,
         device: torch.device | None = None,
     ) -> None:
         self.world_model = world_model
         self.actor = actor
         self.reward_estimator = reward_estimator
         self.exploration = exploration
-        self.uncertainty_penalty = uncertainty_penalty
         self.device = device or torch.device("cpu")
 
     @torch.no_grad()
@@ -85,25 +80,18 @@ class ModelRollout:
 
             # Predict next states using world model (get alpha for exploration)
             if context is not None:
-                next_states, alpha = self.world_model(current_states, actions, context)
+                next_states, alpha = self.world_model(
+                    current_states, actions, context=context
+                )
             else:
                 next_states, alpha = self.world_model(
-                    current_states, actions, building_id
+                    current_states, actions, building_id=building_id
                 )
 
             # Estimate rewards from predicted states + exploration bonus
             rewards = self.reward_estimator.estimate(next_states)
             if self.exploration is not None:
                 rewards = rewards + self.exploration.compute_bonus(alpha)
-
-            # Uncertainty-aware pessimistic reward for probabilistic models
-            if self.uncertainty_penalty > 0 and hasattr(
-                self.world_model, "get_prediction_std"
-            ):
-                pred_std = self.world_model.get_prediction_std()  # ty: ignore[call-non-callable]
-                if pred_std is not None:
-                    penalty = self.uncertainty_penalty * pred_std.mean(dim=-1)
-                    rewards = rewards - penalty
 
             states_list.append(current_states.cpu().numpy())
             actions_list.append(actions.cpu().numpy())
@@ -174,9 +162,13 @@ class ModelRollout:
             model_actions, _ = self.actor(current)
 
             if context is not None:
-                model_next, _ = self.world_model(current, model_actions, context)
+                model_next, _ = self.world_model(
+                    current, model_actions, context=context
+                )
             else:
-                model_next, _ = self.world_model(current, model_actions, building_id)
+                model_next, _ = self.world_model(
+                    current, model_actions, building_id=building_id
+                )
 
             model_rewards = self.reward_estimator.estimate(model_next)
             model_return += (gamma**h) * model_rewards.unsqueeze(-1)

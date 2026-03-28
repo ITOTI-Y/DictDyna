@@ -1,5 +1,6 @@
 """Dyna-SAC: SAC with dictionary world model rollouts."""
 
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -11,13 +12,10 @@ from src.agent.replay_buffer import MixedReplayBuffer
 from src.agent.rollout import ModelRollout
 from src.agent.sac import GaussianActor, SACTrainer, SoftQNetwork
 from src.agent.sparse_exploration import SparseCodeExploration
-from src.obs_config import OBS_CONFIG
 from src.schemas import TrainSchema
-from src.utils import build_dim_weights, get_device
-from src.world_model.dict_dynamics import DictDynamicsModel
-from src.world_model.model_trainer import WorldModelTrainer
+from src.utils import get_device
+from src.world_model.factory import build_trainer, build_world_model
 from src.world_model.reward_estimator import SinergymRewardEstimator
-from src.world_model.sparse_encoder import SparseEncoder
 
 
 class DynaSAC:
@@ -57,54 +55,24 @@ class DynaSAC:
         self.action_dim = action_dim
         self.building_ids = building_ids
 
-        # Soft top-k temperature annealing config
+        # Soft top-k temperature annealing config (dict mode only)
         self._soft_topk_start = config.encoder.soft_topk_temperature
         self._soft_topk_anneal_steps = config.encoder.soft_topk_anneal_steps
 
-        # Build sparse encoder
-        self.encoder = SparseEncoder(
+        # Build world model via factory (respects config.mode)
+        self.world_model = build_world_model(
+            dictionary=dictionary,
             state_dim=state_dim,
             action_dim=action_dim,
-            n_atoms=config.dictionary.n_atoms,
-            shared_hidden_dims=config.encoder.shared_hidden_dims,
-            adapter_dim=config.encoder.adapter_dim,
+            config=config,
+            device=self.device,
             n_buildings=len(building_ids),
-            activation=config.encoder.activation,
-            sparsity_method=config.encoder.sparsity_method,
-            topk_k=config.encoder.topk_k,
-            use_layernorm=config.encoder.use_layernorm,
-            soft_topk_temperature=config.encoder.soft_topk_temperature,
-        ).to(self.device)
-
-        # Build world model (normalized obs space, no conversion needed)
-        dim_weights = build_dim_weights(
-            state_dim,
-            config.dictionary.reward_dims,
-            config.dictionary.reward_dim_weight,
-            self.device,
+            diff_mean=diff_mean,
+            diff_std=diff_std,
+            obs_std=obs_std,
         )
-        ctrl_dims = (
-            OBS_CONFIG.CONTROLLABLE if config.dictionary.controllable_only else None
-        )
-        # Space conversion for controllable-only mode
-        wm_diff_mean = None
-        wm_diff_std = None
-        wm_obs_std = None
-        if ctrl_dims is not None and diff_std is not None and obs_std is not None:
-            wm_diff_mean = diff_mean.to(self.device) if diff_mean is not None else None
-            wm_diff_std = diff_std.to(self.device)
-            wm_obs_std = obs_std[list(ctrl_dims)].to(self.device)
-        self.world_model = DictDynamicsModel(
-            dictionary=dictionary.to(self.device),
-            sparse_encoder=self.encoder,
-            learnable_dict=config.dictionary.slow_update_lr > 0,
-            dim_weights=dim_weights,
-            residual_hidden_dim=config.wm_loss.residual_hidden_dim,
-            controllable_dims=ctrl_dims,
-            diff_mean=wm_diff_mean,
-            diff_std=wm_diff_std,
-            obs_std=wm_obs_std,
-        ).to(self.device)
+        # Expose encoder for soft-topk annealing (dict mode only)
+        self.encoder = self.world_model.encoder
 
         # Build reward estimator (denormalizes predicted states for reward calc)
         self.reward_estimator = SinergymRewardEstimator(
@@ -150,18 +118,7 @@ class DynaSAC:
             device=self.device,
         )
 
-        self.wm_trainer = WorldModelTrainer(
-            model=self.world_model,
-            encoder_lr=config.dictionary.pretrain_lr,
-            dict_lr=config.dictionary.slow_update_lr,
-            sparsity_lambda=config.dictionary.sparsity_lambda,
-            grad_clip_norm=config.wm_loss.grad_clip_norm,
-            grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
-            identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
-            dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
-            use_dim_weighting=config.wm_loss.use_dim_weighting,
-            residual_lambda=config.wm_loss.residual_lambda,
-        )
+        self.wm_trainer = build_trainer(self.world_model, config)
 
         # Build sparse-code exploration module
         self.exploration = SparseCodeExploration(eta=0.1)
@@ -191,6 +148,11 @@ class DynaSAC:
         # Building id to index mapping
         self._bid_to_idx = {bid: str(i) for i, bid in enumerate(building_ids)}
 
+        # Context mode: maintain per-building transition window
+        self._is_context_mode = config.mode == "context"
+        self._context_window: deque = deque(maxlen=config.context.context_window)
+        self._current_context: torch.Tensor | None = None
+
     def train_step(
         self,
         state: np.ndarray,
@@ -218,18 +180,33 @@ class DynaSAC:
         metrics: dict[str, float] = {}
         bid_idx = self._bid_to_idx[building_id]
 
-        # Anneal soft top-k temperature
-        if self._soft_topk_start > 0 and self._soft_topk_anneal_steps > 0:
+        # Anneal soft top-k temperature (dict mode only)
+        if (
+            not self._is_context_mode
+            and self._soft_topk_start > 0
+            and self._soft_topk_anneal_steps > 0
+        ):
             progress = min(global_step / self._soft_topk_anneal_steps, 1.0)
             temp = self._soft_topk_start * (1.0 - progress) + 0.01 * progress
             self.encoder.soft_topk_temperature = temp
             metrics["diag/soft_topk_temp"] = temp
+
+        # Update context window (context mode)
+        if self._is_context_mode:
+            delta = next_state - state
+            transition = torch.tensor(
+                np.concatenate([state, action, delta]), dtype=torch.float32
+            )
+            self._context_window.append(transition)
 
         # 1. Store real transition
         self.buffer.add_real(state, action, reward, next_state, done)
 
         if self.buffer.real_size < self.config.batch_size:
             return metrics
+
+        # Build WM routing kwargs (building_id or context)
+        wm_kwargs = self._get_wm_kwargs(bid_idx)
 
         # 2. Update world model (reward-weighted: high TD-error → higher weight)
         if global_step % self.config.dyna.model_update_freq == 0:
@@ -244,12 +221,19 @@ class DynaSAC:
                 self.config.gamma,
             )
 
+            # Expand context to batch size if needed
+            train_kwargs = dict(wm_kwargs)
+            if "context" in train_kwargs:
+                train_kwargs["context"] = train_kwargs["context"].expand(
+                    self.config.batch_size, -1
+                )
+
             wm_metrics = self.wm_trainer.train_step(
                 batch["states"],
                 batch["actions"],
                 batch["next_states"],
-                bid_idx,
                 sample_weights=weights,
+                **train_kwargs,
             )
             metrics.update({f"wm/{k}": v for k, v in wm_metrics.items()})
 
@@ -263,9 +247,9 @@ class DynaSAC:
                     seq_batch["states"],
                     seq_batch["actions"],
                     seq_batch["next_states"],
-                    building_id=bid_idx,
                     discount=self.config.dyna.multistep_discount,
                     teacher_forcing_ratio=self.config.dyna.teacher_forcing_ratio,
+                    **train_kwargs,
                 )
                 metrics.update({f"wm/{k}": v for k, v in ms_metrics.items()})
 
@@ -273,8 +257,8 @@ class DynaSAC:
         use_model = global_step >= self.config.dyna.rollout_start_step
         if use_model:
             # Compute model quality: how much better than identity mapping
-            if "wm/mse_loss" in metrics and "wm/identity_penalty" in metrics:
-                wm_mse = metrics["wm/mse_loss"]
+            if "wm/mse" in metrics and "wm/identity_penalty" in metrics:
+                wm_mse = metrics["wm/mse"]
                 id_pen = metrics["wm/identity_penalty"]
                 # quality ∈ [0, 1]: 0 = worse than identity, 1 = much better
                 quality = max(0.0, 1.0 - id_pen / (wm_mse + 1e-8))
@@ -296,7 +280,12 @@ class DynaSAC:
             start_batch = self.buffer.real_buffer.sample(n_rollouts, self.device)
             start_states = start_batch["states"].cpu().numpy()
 
-            rollout_data = self.rollout_gen.generate(start_states, bid_idx, horizon)
+            rollout_data = self.rollout_gen.generate(
+                start_states,
+                bid_idx,
+                horizon,
+                context=wm_kwargs.get("context") if self._is_context_mode else None,
+            )
             self.buffer.add_model_batch(
                 rollout_data["states"],
                 rollout_data["actions"],
@@ -358,6 +347,31 @@ class DynaSAC:
         metrics["diag/real_buf_size"] = float(self.buffer.real_size)
 
         return metrics
+
+    def _get_wm_kwargs(self, bid_idx: str) -> dict[str, object]:
+        """Get world model routing kwargs (building_id or context)."""
+        if not self._is_context_mode:
+            return {"building_id": bid_idx}
+
+        # Infer context from transition window
+        if len(self._context_window) == 0:
+            ctx_dim = self.config.context.context_dim
+            self._current_context = torch.zeros(1, ctx_dim, device=self.device)
+        else:
+            window_size = self.config.context.context_window
+            transitions = torch.stack(list(self._context_window)).unsqueeze(0)
+            transitions = transitions.to(self.device)
+            if transitions.shape[1] < window_size:
+                pad = torch.zeros(
+                    1,
+                    window_size - transitions.shape[1],
+                    transitions.shape[2],
+                    device=self.device,
+                )
+                transitions = torch.cat([pad, transitions], dim=1)
+            with torch.no_grad():
+                self._current_context = self.world_model.infer_context(transitions)  # type: ignore[union-attr]
+        return {"context": self._current_context}
 
     def on_episode_end(self) -> None:
         """Clear model buffer and decay exploration counts at episode boundary."""

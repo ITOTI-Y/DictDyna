@@ -288,7 +288,11 @@ class FewShotTransferExperiment:
         for _epoch in range(50):
             dyna.world_model.train()
             loss, _ = dyna.world_model.compute_loss(
-                adapt_s, adapt_a, adapt_sn, target_idx, 0.1
+                adapt_s,
+                adapt_a,
+                adapt_sn,
+                building_id=target_idx,
+                sparsity_lambda=0.1,
             )
             optimizer.zero_grad()
             loss.backward()
@@ -437,7 +441,11 @@ class FewShotTransferExperiment:
                 target_context = ctx_model.infer_context(transitions_t)
                 context_expanded = target_context.expand(len(indices), -1)
                 loss, _ = ctx_model.compute_loss(
-                    adapt_s, adapt_a, adapt_sn, context_expanded, 0.1
+                    adapt_s,
+                    adapt_a,
+                    adapt_sn,
+                    context=context_expanded,
+                    sparsity_lambda=0.1,
                 )
                 optimizer.zero_grad()
                 loss.backward()
@@ -527,7 +535,13 @@ class FewShotTransferExperiment:
 
         for _epoch in range(50):
             dyna.world_model.train()
-            loss, _ = dyna.world_model.compute_loss(s, a, sn, "0", 0.1)
+            loss, _ = dyna.world_model.compute_loss(
+                s,
+                a,
+                sn,
+                building_id="0",
+                sparsity_lambda=0.1,
+            )
             dyna.wm_trainer.optimizer.zero_grad()
             loss.backward()
             dyna.wm_trainer.optimizer.step()

@@ -1,5 +1,7 @@
 """Pydantic v2 configuration schemas for DictDyna."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.obs_config import OBS_CONFIG
@@ -89,12 +91,6 @@ class WorldModelLossSchema(BaseModel):
     grad_clip_dict_norm: float = Field(
         0.1, gt=0, description="Gradient clip norm for dictionary"
     )
-    probabilistic: bool = Field(
-        False, description="Use probabilistic world model with per-atom variance"
-    )
-    uncertainty_penalty: float = Field(
-        1.0, ge=0, description="Pessimistic reward penalty coefficient (beta)"
-    )
     residual_hidden_dim: int = Field(
         128, ge=0, description="Residual correction head hidden dim (0=disabled)"
     )
@@ -177,6 +173,10 @@ class TrainSchema(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    mode: Literal["context", "dict"] = Field(
+        "context",
+        description="World model mode: 'context' (recommended) or 'dict' (adapter-based fallback)",
+    )
     seed: int = 42
     total_timesteps: int = Field(
         35040 * 3, description="3 episodes (Sinergym: 35040 steps/year at 15-min)"

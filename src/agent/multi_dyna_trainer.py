@@ -21,8 +21,9 @@ from src.agent.rollout import ModelRollout
 from src.obs_config import OBS_CONFIG
 from src.schemas import TrainSchema
 from src.utils import build_dim_weights, get_device, seed_everything, sinergym_workdir
-from src.world_model.dict_dynamics import DictDynamicsModel
-from src.world_model.model_trainer import ContextWorldModelTrainer, WorldModelTrainer
+from src.world_model._share import BaseDictDynamics
+from src.world_model.factory import build_trainer, build_world_model
+from src.world_model.model_trainer import WorldModelTrainer
 
 with contextlib.suppress(ImportError):
     import sinergym  # noqa: F401
@@ -109,8 +110,7 @@ class MultiBuildingDynaSAC:
         )
 
         # Context-conditioned mode: replace adapter routing with context vector
-        self._context_wm: None = None  # placeholder
-        self._context_wm_trainer: ContextWorldModelTrainer | None = None
+        self._context_wm_trainer: WorldModelTrainer | None = None
         self._context_windows: dict[str, deque] = {}
         if context_mode:
             self._setup_context(dictionary, config, dict_data, state_dim, action_dim)
@@ -128,56 +128,8 @@ class MultiBuildingDynaSAC:
             self.device,
         )
 
-        # Replace world model with shared-private version for shared mode
-        if not independent_dict and not context_mode:
-            from src.world_model.shared_private_dynamics import SharedPrivateWorldModel
-
-            n_shared = dictionary.shape[1]  # 128 pretrained atoms → 64 shared
-            sp_model = SharedPrivateWorldModel(
-                shared_dict=dictionary[:, : n_shared // 2].to(self.device),
-                n_private_atoms=n_shared // 2,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                hidden_dims=config.encoder.shared_hidden_dims,
-                adapter_dim=config.encoder.adapter_dim,
-                n_buildings=self.n_buildings,
-                topk_shared=config.encoder.topk_k // 2,
-                topk_private=config.encoder.topk_k // 2,
-                dim_weights=self._dim_weights,
-                residual_hidden_dim=config.wm_loss.residual_hidden_dim,
-                controllable_dims=self._ctrl_dims,
-            ).to(self.device)
-            # Replace DynaSAC's world model and trainer
-            self.dyna.world_model = sp_model
-            self.dyna.wm_trainer = WorldModelTrainer(
-                model=sp_model,  # ty: ignore[invalid-argument-type]
-                encoder_lr=config.dictionary.pretrain_lr,
-                dict_lr=config.dictionary.slow_update_lr,
-                sparsity_lambda=config.dictionary.sparsity_lambda,
-                grad_clip_norm=config.wm_loss.grad_clip_norm,
-                grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
-                identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
-                dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
-                use_dim_weighting=config.wm_loss.use_dim_weighting,
-                residual_lambda=config.wm_loss.residual_lambda,
-            )
-            # Update rollout generator
-            from src.agent.rollout import ModelRollout
-
-            self.dyna.rollout_gen = ModelRollout(
-                world_model=sp_model,
-                actor=self.dyna.actor,
-                reward_estimator=self.dyna.reward_estimator,
-                exploration=self.dyna.exploration,
-                device=self.device,
-            )
-            logger.info(
-                f"Shared-Private model: {n_shared // 2} shared (frozen) + "
-                f"{n_shared // 2} private (trainable) atoms"
-            )
-
         # Independent dict mode: per-building world models
-        self._per_building_wm: dict[str, DictDynamicsModel] = {}
+        self._per_building_wm: dict[str, BaseDictDynamics] = {}
         self._per_building_trainer: dict[str, WorldModelTrainer] = {}
         self._per_building_rollout: dict[str, ModelRollout] = {}
         if independent_dict:
@@ -196,49 +148,24 @@ class MultiBuildingDynaSAC:
         self, base_dict: torch.Tensor, config: TrainSchema, dict_data: dict
     ) -> None:
         """Create per-building world models with independent dictionaries."""
-        from src.world_model.sparse_encoder import SparseEncoder
-
         state_dim = base_dict.shape[0]
         action_dim = self.dyna.action_dim
 
         for _bid_idx, bid in enumerate(self.building_ids):
-            # Independent encoder (own trunk + adapter)
-            encoder = SparseEncoder(
-                state_dim=state_dim,
-                action_dim=action_dim,
-                n_atoms=config.dictionary.n_atoms,
-                shared_hidden_dims=config.encoder.shared_hidden_dims,
-                adapter_dim=config.encoder.adapter_dim,
-                n_buildings=1,
-                activation=config.encoder.activation,
-                sparsity_method=config.encoder.sparsity_method,
-                topk_k=config.encoder.topk_k,
-            ).to(self.device)
-
             # Independent dictionary (random init, no cross-building pretrain)
             random_dict = torch.randn_like(base_dict)
             random_dict = random_dict / random_dict.norm(dim=0, keepdim=True)
-            wm = DictDynamicsModel(
-                dictionary=random_dict.to(self.device),
-                sparse_encoder=encoder,
-                learnable_dict=True,  # must learn from scratch
-                dim_weights=self._dim_weights,
-                residual_hidden_dim=config.wm_loss.residual_hidden_dim,
-                controllable_dims=self._ctrl_dims,
-            ).to(self.device)
 
-            trainer = WorldModelTrainer(
-                model=wm,
-                encoder_lr=config.dictionary.pretrain_lr,
-                dict_lr=config.dictionary.slow_update_lr,
-                sparsity_lambda=config.dictionary.sparsity_lambda,
-                grad_clip_norm=config.wm_loss.grad_clip_norm,
-                grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
-                identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
-                dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
-                use_dim_weighting=config.wm_loss.use_dim_weighting,
-                residual_lambda=config.wm_loss.residual_lambda,
+            wm = build_world_model(
+                dictionary=random_dict,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                config=config,
+                device=self.device,
+                n_buildings=1,
+                mode="dict",  # independent = per-building adapter
             )
+            trainer = build_trainer(wm, config)
 
             rollout = ModelRollout(
                 world_model=wm,
@@ -266,54 +193,18 @@ class MultiBuildingDynaSAC:
         action_dim: int,
     ) -> None:
         """Set up context-conditioned world model."""
-        from src.world_model.context_dynamics import ContextDynamicsModel
-        from src.world_model.context_encoder import (
-            ContextConditionedEncoder,
-            ContextEncoder,
+        ctx_model = build_world_model(
+            dictionary=dictionary,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            config=config,
+            device=self.device,
+            mode="context",
         )
-
-        ctx_cfg = config.context
-        context_encoder = ContextEncoder(
-            state_dim=state_dim,
-            action_dim=action_dim,
-            context_dim=ctx_cfg.context_dim,
-            hidden_dims=ctx_cfg.hidden_dims,
-        ).to(self.device)
-
-        conditioned_encoder = ContextConditionedEncoder(
-            state_dim=state_dim,
-            action_dim=action_dim,
-            context_dim=ctx_cfg.context_dim,
-            n_atoms=config.dictionary.n_atoms,
-            shared_hidden_dims=config.encoder.shared_hidden_dims,
-            sparsity_method=config.encoder.sparsity_method,
-            topk_k=config.encoder.topk_k,
-            use_layernorm=config.encoder.use_layernorm,
-        ).to(self.device)
-
-        ctx_model = ContextDynamicsModel(
-            dictionary=dictionary.to(self.device),
-            context_encoder=context_encoder,
-            conditioned_encoder=conditioned_encoder,
-            learnable_dict=config.dictionary.slow_update_lr > 0,
-            dim_weights=self._dim_weights,
-            residual_hidden_dim=config.wm_loss.residual_hidden_dim,
-        ).to(self.device)
 
         # Replace DynaSAC's world model and trainer
         self.dyna.world_model = ctx_model
-        self._context_wm_trainer = ContextWorldModelTrainer(
-            model=ctx_model,
-            encoder_lr=config.dictionary.pretrain_lr,
-            context_lr=ctx_cfg.context_lr,
-            dict_lr=config.dictionary.slow_update_lr,
-            sparsity_lambda=config.dictionary.sparsity_lambda,
-            grad_clip_norm=config.wm_loss.grad_clip_norm,
-            grad_clip_dict_norm=config.wm_loss.grad_clip_dict_norm,
-            identity_penalty_lambda=config.wm_loss.identity_penalty_lambda,
-            dim_weight_ema_decay=config.wm_loss.dim_weight_ema_decay,
-            use_dim_weighting=config.wm_loss.use_dim_weighting,
-        )
+        self._context_wm_trainer = build_trainer(ctx_model, config)
         self.dyna.rollout_gen = ModelRollout(
             world_model=ctx_model,
             actor=self.dyna.actor,
@@ -323,6 +214,7 @@ class MultiBuildingDynaSAC:
         )
 
         # Per-building context windows (ring buffer of recent transitions)
+        ctx_cfg = config.context
         for bid in self.building_ids:
             self._context_windows[bid] = deque(maxlen=ctx_cfg.context_window)
 
@@ -614,8 +506,8 @@ class MultiBuildingDynaSAC:
                     batch["states"],
                     batch["actions"],
                     batch["next_states"],
-                    context_expanded,
-                    weights,
+                    sample_weights=weights,
+                    context=context_expanded,
                 )
 
         # 2. Model rollouts with context
@@ -679,8 +571,8 @@ class MultiBuildingDynaSAC:
             batch["states"],
             batch["actions"],
             batch["next_states"],
-            bid_str,
-            weights,
+            sample_weights=weights,
+            building_id=bid_str,
         )
 
     def _save_results(
