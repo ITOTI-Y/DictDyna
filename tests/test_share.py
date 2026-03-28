@@ -404,8 +404,8 @@ class TestBuildResidualHead:
         """Output layer should have small initial weights."""
         head = build_residual_head(input_dim=64, hidden_dim=32, output_dim=10)
         out_layer = head[2]  # Sequential: Linear, Tanh, Linear
-        assert out_layer.weight.abs().max().item() < 0.1
-        assert (out_layer.bias == 0).all()
+        assert out_layer.weight.abs().max().item() < 0.1  # type: ignore
+        assert (out_layer.bias == 0).all()  # type: ignore
 
 
 class TestRbcMidpointAction:

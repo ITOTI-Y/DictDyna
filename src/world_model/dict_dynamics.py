@@ -140,8 +140,8 @@ class DictDynamicsModel(nn.Module):
             delta_raw,
             state,
             self.controllable_dims,
-            self._scale,
-            self._bias,
+            self._scale, # type: ignore
+            self._bias, # type: ignore
             self._has_conversion,
         )
 

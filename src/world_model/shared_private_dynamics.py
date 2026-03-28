@@ -297,7 +297,7 @@ class SharedPrivateWorldModel(nn.Module):
 
         # Space conversion (full-dim delta, unlike DictDynamicsModel)
         if self._has_conversion:
-            delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
+            delta = delta * self._scale + self._bias
         if self.controllable_dims is not None:
             mask = torch.zeros_like(delta)
             mask[:, self.controllable_dims] = 1.0
