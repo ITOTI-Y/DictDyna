@@ -16,6 +16,7 @@ import torch
 from loguru import logger
 
 from src.agent.dyna_sac import DynaSAC
+from src.obs_config import OBS_CONFIG
 from src.schemas import TrainSchema
 from src.utils import build_dim_weights, get_device, seed_everything, sinergym_workdir
 
@@ -382,6 +383,9 @@ class FewShotTransferExperiment:
             learnable_dict=True,
             dim_weights=dim_weights,
             residual_hidden_dim=self.config.wm_loss.residual_hidden_dim,
+            controllable_dims=OBS_CONFIG.CONTROLLABLE
+            if self.config.dictionary.controllable_only
+            else None,
         ).to(self.device)
 
         # Replace DynaSAC's world model and rollout gen

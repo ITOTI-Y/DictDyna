@@ -13,6 +13,7 @@ from loguru import logger
 from src.agent.dyna_sac import DynaSAC
 from src.agent.replay_buffer import ReplayBuffer, TaggedReplayBuffer
 from src.agent.rollout import ModelRollout
+from src.obs_config import OBS_CONFIG
 from src.schemas import TrainSchema
 from src.utils import build_dim_weights, get_device, seed_everything, sinergym_workdir
 from src.world_model.dict_dynamics import DictDynamicsModel
@@ -109,6 +110,11 @@ class MultiBuildingDynaSAC:
         if context_mode:
             self._setup_context(dictionary, config, dict_data, state_dim, action_dim)
 
+        # Controllable dims for WM
+        self._ctrl_dims = (
+            OBS_CONFIG.CONTROLLABLE if config.dictionary.controllable_only else None
+        )
+
         # Build dim_weights for world model loss weighting
         self._dim_weights = build_dim_weights(
             state_dim,
@@ -134,6 +140,7 @@ class MultiBuildingDynaSAC:
                 topk_private=config.encoder.topk_k // 2,
                 dim_weights=self._dim_weights,
                 residual_hidden_dim=config.wm_loss.residual_hidden_dim,
+                controllable_dims=self._ctrl_dims,
             ).to(self.device)
             # Replace DynaSAC's world model and trainer
             self.dyna.world_model = sp_model
@@ -212,6 +219,7 @@ class MultiBuildingDynaSAC:
                 learnable_dict=True,  # must learn from scratch
                 dim_weights=self._dim_weights,
                 residual_hidden_dim=config.wm_loss.residual_hidden_dim,
+                controllable_dims=self._ctrl_dims,
             ).to(self.device)
 
             trainer = WorldModelTrainer(

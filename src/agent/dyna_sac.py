@@ -10,6 +10,7 @@ from src.agent.replay_buffer import MixedReplayBuffer
 from src.agent.rollout import ModelRollout
 from src.agent.sac import GaussianActor, SACTrainer, SoftQNetwork
 from src.agent.sparse_exploration import SparseCodeExploration
+from src.obs_config import OBS_CONFIG
 from src.schemas import TrainSchema
 from src.utils import build_dim_weights, get_device
 from src.world_model.dict_dynamics import DictDynamicsModel
@@ -46,6 +47,8 @@ class DynaSAC:
         action_bias: float | np.ndarray = 0.0,
         obs_mean: torch.Tensor | None = None,
         obs_std: torch.Tensor | None = None,
+        diff_mean: torch.Tensor | None = None,
+        diff_std: torch.Tensor | None = None,
     ) -> None:
         self.config = config
         self.device = get_device(config.device)
@@ -79,12 +82,27 @@ class DynaSAC:
             config.dictionary.reward_dim_weight,
             self.device,
         )
+        ctrl_dims = (
+            OBS_CONFIG.CONTROLLABLE if config.dictionary.controllable_only else None
+        )
+        # Space conversion for controllable-only mode
+        wm_diff_mean = None
+        wm_diff_std = None
+        wm_obs_std = None
+        if ctrl_dims is not None and diff_std is not None and obs_std is not None:
+            wm_diff_mean = diff_mean.to(self.device) if diff_mean is not None else None
+            wm_diff_std = diff_std.to(self.device)
+            wm_obs_std = obs_std[list(ctrl_dims)].to(self.device)
         self.world_model = DictDynamicsModel(
             dictionary=dictionary.to(self.device),
             sparse_encoder=self.encoder,
             learnable_dict=config.dictionary.slow_update_lr > 0,
             dim_weights=dim_weights,
             residual_hidden_dim=config.wm_loss.residual_hidden_dim,
+            controllable_dims=ctrl_dims,
+            diff_mean=wm_diff_mean,
+            diff_std=wm_diff_std,
+            obs_std=wm_obs_std,
         ).to(self.device)
 
         # Build reward estimator (denormalizes predicted states for reward calc)

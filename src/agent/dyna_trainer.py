@@ -88,6 +88,12 @@ class DynaSACTrainer:
             action_bias=self.action_bias,
             obs_mean=dict_data["obs_mean"],  # for reward estimator denorm
             obs_std=dict_data["obs_std"],  # for reward estimator denorm
+            diff_mean=dict_data.get(
+                "diff_mean"
+            ),  # for controllable-only space conversion
+            diff_std=dict_data.get(
+                "diff_std"
+            ),  # for controllable-only space conversion
         )
 
     def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:

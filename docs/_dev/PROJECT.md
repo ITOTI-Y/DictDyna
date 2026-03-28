@@ -579,6 +579,44 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - **最终 v4 仅追平 baseline**（-5150 vs -5173），说明 17 维 obs 中 128 原子的稀疏线性组合已有足够表达力
 - **结论**：当前 Sinergym 5zone 场景下非线性残差修正无正面贡献，D@α 线性重构不是性能瓶颈
 
+#### H 组：可控维度裁剪（单建筑 hot，seed=42，2026-03-28）
+
+**动机**：17 维 obs 中 9 维为外生变量（时间+天气），WM 无法预测其变化，导致 WM MSE ≈ identity MSE。裁剪为只预测 4 个可控维度（air_temp, air_humidity, hvac_power, hvac_energy）。
+
+**Sinergym 5zone 完整 17 维映射**（Docker 验证，三建筑一致）：
+
+| 类别 | 维度 | 变量 |
+|------|------|------|
+| 时间（外生） | 0,1,2 | month, day_of_month, hour |
+| 天气（外生） | 3,4,5,6,7,8 | outdoor_temp/hum, wind_speed/dir, solar×2 |
+| 室内（可控） | **9,10** | **air_temperature, air_humidity** |
+| 负荷（外生） | 11 | people_occupant |
+| 设定（action） | 12,13 | heating/cooling_setpoint |
+| 排放（常数） | 14 | co2_emission（恒零） |
+| 能耗（可控） | **15,16** | **HVAC_power, HVAC_energy** |
+
+**首轮实验（未归一化 diff）**：
+
+| 配置 | 字典维度 | K | Ep1 | Ep2 | Ep3 | WM MSE | vs Baseline |
+|------|---------|---|-----|-----|-----|--------|-------------|
+| **Full 17-dim** | (17,128) | 128 | -6462 | -5326 | **-5173** | 0.19 | — |
+| Ctrl 4-dim | (4,32) | 32 | -6848 | -5491 | -5327 | 13.2 | -3.0% |
+
+**归一化 + loss 修复后**：
+
+| 配置 | 字典 | WM MSE | Ep3 | vs Baseline |
+|------|------|--------|-----|-------------|
+| **Full 17-dim (baseline)** | (17,128) | 0.19 | **-5173** | — |
+| Ctrl 4-dim (未归一化) | (4,32) | 13.2 | -5327 | -3.0% |
+| Ctrl 4-dim (归一化, loss全维) | (4,32) | 14.7 | -5426 | -4.9% |
+| **Ctrl 4-dim (归一化, loss仅ctrl)** | (4,32) | **0.049** | -5411 | -4.6% |
+
+**发现**：
+- 可控维度 WM MSE 从 0.19 降至 **0.049**（-74%），预测质量大幅提升
+- 但 RL 性能仍差 4.6%，原因：rollout 中外生维度保持 identity（尤其 month 冻结导致 reward estimator 季节判断偏差）
+- K=32 vs K=128 也可能是因素
+- **结论**：可控维度裁剪显著改善 WM 精度，但端到端 RL 增益受限于 rollout 外生维度处理
+
 ---
 
 ## 技术栈

@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.obs_config import OBS_CONFIG
+
 
 class DictionarySchema(BaseModel):
     """Dictionary learning configuration."""
@@ -20,8 +22,12 @@ class DictionarySchema(BaseModel):
         5.0, ge=1.0, description="Weight multiplier for reward-critical dimensions"
     )
     reward_dims: list[int] = Field(
-        default=[9, 15],
-        description="Reward-critical state indices (indoor_temp=9, hvac_power=15)",
+        default=[OBS_CONFIG.AIR_TEMPERATURE, OBS_CONFIG.HVAC_POWER],
+        description="Reward-critical state indices (air_temperature, HVAC_power)",
+    )
+    controllable_only: bool = Field(
+        False,
+        description="WM predicts only controllable dims (4) instead of all (17)",
     )
 
 

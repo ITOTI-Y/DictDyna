@@ -40,9 +40,11 @@ class DictDynamicsModel(nn.Module):
         obs_std: torch.Tensor | None = None,
         dim_weights: torch.Tensor | None = None,
         residual_hidden_dim: int = 0,
+        controllable_dims: tuple[int, ...] | None = None,
     ) -> None:
         super().__init__()
         self.encoder = sparse_encoder
+        self.controllable_dims = controllable_dims
 
         if learnable_dict:
             self.dictionary = nn.Parameter(dictionary.clone())
@@ -116,18 +118,27 @@ class DictDynamicsModel(nn.Module):
         if self.encoder.sparsity_method == "topk":
             alpha = self.encoder._topk_sparsify(alpha)
 
-        delta = alpha @ self.dictionary.T
+        delta_raw = alpha @ self.dictionary.T
 
         # Nonlinear residual correction
         if self.residual_head is not None:
             residual = self.residual_head(h)
-            delta = delta + residual
+            delta_raw = delta_raw + residual
             self._last_residual = residual
         else:
             self._last_residual = None
 
-        if self._has_conversion:
-            delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
+        # Controllable-only mode: embed predicted delta into full obs space
+        if self.controllable_dims is not None:
+            delta = torch.zeros_like(state)
+            if self._has_conversion:
+                delta_raw = delta_raw * self._scale + self._bias  # ty: ignore[unsupported-operator]
+            delta[:, list(self.controllable_dims)] = delta_raw
+        else:
+            delta = delta_raw
+            if self._has_conversion:
+                delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
+
         next_state = state + delta
         return next_state, alpha
 
@@ -172,11 +183,22 @@ class DictDynamicsModel(nn.Module):
         """
         pred_next, alpha = self.forward(state, action, building_id)
 
+        # In controllable-only mode, compute loss only on predicted dims
+        if self.controllable_dims is not None:
+            ctrl = list(self.controllable_dims)
+            loss_pred = pred_next[:, ctrl]
+            loss_target = next_state[:, ctrl]
+            loss_state = state[:, ctrl]
+        else:
+            loss_pred = pred_next
+            loss_target = next_state
+            loss_state = state
+
         if use_dim_weighting or identity_penalty_lambda > 0:
             mse_loss, extra = compute_dim_weighted_mse(
-                pred=pred_next,
-                target=next_state,
-                state=state,
+                pred=loss_pred,
+                target=loss_target,
+                state=loss_state,
                 dim_ema=self._dim_ema,  # ty: ignore[invalid-argument-type]
                 ema_decay=dim_weight_ema_decay,
                 identity_penalty_lambda=identity_penalty_lambda,
@@ -184,7 +206,7 @@ class DictDynamicsModel(nn.Module):
                 training=self.training,
             )
         else:
-            per_dim_sq_err = (next_state - pred_next) ** 2
+            per_dim_sq_err = (loss_target - loss_pred) ** 2
             if self.dim_weights is not None:
                 per_dim_sq_err = per_dim_sq_err * self.dim_weights
             per_sample_mse = per_dim_sq_err.mean(dim=-1)

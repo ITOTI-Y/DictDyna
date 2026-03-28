@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from loguru import logger
 
+from src.obs_config import OBS_CONFIG
 from src.utils import build_dim_weights, get_device
 from src.world_model.dict_dynamics import DictDynamicsModel
 from src.world_model.model_trainer import WorldModelTrainer
@@ -75,7 +76,12 @@ def train_world_model(
         topk_k=topk_k,
     ).to(dev)
 
-    dim_weights = build_dim_weights(state_dim, [9, 15], 5.0, dev)
+    dim_weights = build_dim_weights(
+        state_dim,
+        [OBS_CONFIG.AIR_TEMPERATURE, OBS_CONFIG.HVAC_POWER],
+        5.0,
+        dev,
+    )
     model = DictDynamicsModel(
         dictionary=dictionary,
         sparse_encoder=encoder,

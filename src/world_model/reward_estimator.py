@@ -2,6 +2,8 @@
 
 import torch
 
+from src.obs_config import OBS_CONFIG
+
 
 class SinergymRewardEstimator:
     """Estimate Sinergym LinearReward from predicted state.
@@ -43,9 +45,9 @@ class SinergymRewardEstimator:
         self.range_winter = range_comfort_winter
         self.summer_months = summer_months
         self.state_indices = state_indices or {
-            "month": 0,
-            "indoor_temp": 9,
-            "hvac_power": 15,
+            "month": OBS_CONFIG.MONTH,
+            "indoor_temp": OBS_CONFIG.AIR_TEMPERATURE,
+            "hvac_power": OBS_CONFIG.HVAC_POWER,
         }
         self.obs_mean = obs_mean
         self.obs_std = obs_std
