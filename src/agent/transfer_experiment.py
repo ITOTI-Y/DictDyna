@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from loguru import logger
 
+from src.agent._share import normalize_obs
 from src.agent.dyna_sac import DynaSAC
 from src.obs_config import OBS_CONFIG
 from src.schemas import TrainSchema
@@ -85,9 +86,7 @@ class FewShotTransferExperiment:
         probe.close()
 
     def _normalize(self, raw: np.ndarray) -> np.ndarray:
-        return np.clip((raw - self._obs_mean) / self._obs_std, -10, 10).astype(
-            np.float32
-        )
+        return normalize_obs(raw, self._obs_mean, self._obs_std)
 
     def run(self) -> dict:
         """Run the full transfer experiment."""

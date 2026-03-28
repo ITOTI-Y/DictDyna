@@ -18,6 +18,7 @@ unique to the dictionary learning + MBRL combination.
 import torch
 import torch.nn as nn
 
+from src.world_model._share import normalize_atoms as _normalize_atoms
 from src.world_model.loss_utils import compute_dim_weighted_mse
 from src.world_model.sparse_encoder import BuildingAdapter, SparseEncoder
 
@@ -161,10 +162,7 @@ class ProbabilisticDictDynamics(nn.Module):
         return torch.sqrt(self._last_pred_var + 1e-8)
 
     def normalize_atoms(self) -> None:
-        with torch.no_grad():
-            norms = torch.norm(self.dictionary, dim=0, keepdim=True)
-            norms = torch.clamp(norms, min=1e-10)
-            self.dictionary.div_(norms)
+        _normalize_atoms(self.dictionary)
 
     def compute_loss(
         self,

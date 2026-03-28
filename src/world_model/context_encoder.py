@@ -12,6 +12,8 @@ Architecture:
 import torch
 import torch.nn as nn
 
+from src.world_model._share import topk_sparsify
+
 
 class ContextEncoder(nn.Module):
     """Infer building thermal fingerprint from recent transitions.
@@ -150,12 +152,6 @@ class ContextConditionedEncoder(nn.Module):
 
     def _topk_sparsify(self, alpha: torch.Tensor) -> torch.Tensor:
         """Apply top-k sparsity with optional soft relaxation."""
-        if self.soft_topk_temperature > 0 and self.training:
-            abs_alpha = alpha.abs()
-            kth_val = abs_alpha.topk(self.topk_k, dim=-1).values[:, -1:]
-            mask = torch.sigmoid((abs_alpha - kth_val) / self.soft_topk_temperature)
-            return alpha * mask
-        _, indices = torch.topk(alpha.abs(), self.topk_k, dim=-1)
-        mask = torch.zeros_like(alpha)
-        mask.scatter_(-1, indices, 1.0)
-        return alpha * mask
+        return topk_sparsify(
+            alpha, self.topk_k, self.soft_topk_temperature, self.training
+        )

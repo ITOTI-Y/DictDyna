@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+from collections import deque
 from pathlib import Path
 
 import gymnasium
@@ -9,6 +10,7 @@ import numpy as np
 import torch
 from loguru import logger
 
+from src.agent._share import DEFAULT_LEARNING_STARTS, normalize_obs
 from src.agent.dyna_sac import DynaSAC
 from src.schemas import TrainSchema
 from src.utils import get_device, seed_everything, sinergym_workdir
@@ -98,9 +100,7 @@ class DynaSACTrainer:
 
     def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:
         """Normalize observation: (s - obs_mean) / obs_std."""
-        return np.clip((raw_obs - self._obs_mean) / self._obs_std, -10.0, 10.0).astype(
-            np.float32
-        )
+        return normalize_obs(raw_obs, self._obs_mean, self._obs_std)
 
     def train(self) -> dict:
         """Run full Dyna-SAC training loop."""
@@ -117,14 +117,14 @@ class DynaSACTrainer:
         total_steps = self.config.total_timesteps
         eval_freq = self.config.eval_freq
         log_interval = self.config.log_interval
-        learning_starts = min(1000, self.config.batch_size * 2)
+        learning_starts = min(DEFAULT_LEARNING_STARTS, self.config.batch_size * 2)
 
         raw_obs, _ = self.env.reset(seed=self.seed)
         obs = self._normalize_obs(raw_obs)
         episode_reward = 0.0
         episode_count = 0
         episode_rewards: list[float] = []
-        self._recent_episode_rewards: list[float] = []
+        self._recent_rewards: deque[float] = deque(maxlen=self.config.n_eval_episodes)
         eval_history: list[dict] = []
         diagnostics: list[dict] = []
 
@@ -170,7 +170,7 @@ class DynaSACTrainer:
             if done:
                 episode_count += 1
                 episode_rewards.append(episode_reward)
-                self._recent_episode_rewards.append(episode_reward)
+                self._recent_rewards.append(episode_reward)
                 logger.info(
                     f"Episode {episode_count} | Step {step}/{total_steps} | "
                     f"Reward: {episode_reward:.1f}"
@@ -213,8 +213,12 @@ class DynaSACTrainer:
         return {"episode_rewards": episode_rewards, "eval_history": eval_history}
 
     def _evaluate(self) -> dict:
-        if self._recent_episode_rewards:
-            return {"mean_reward": self._recent_episode_rewards[-1], "std_reward": 0.0}
+        if self._recent_rewards:
+            rewards = np.array(self._recent_rewards)
+            return {
+                "mean_reward": float(rewards.mean()),
+                "std_reward": float(rewards.std()),
+            }
         return {"mean_reward": 0.0, "std_reward": 0.0}
 
     def _save_results(

@@ -10,6 +10,13 @@ Core equation: s_hat' = s + D * alpha(s, a, z) + residual(h)
 import torch
 import torch.nn as nn
 
+from src.world_model._share import (
+    apply_space_conversion,
+    build_residual_head,
+)
+from src.world_model._share import (
+    normalize_atoms as _normalize_atoms,
+)
 from src.world_model.context_encoder import ContextConditionedEncoder, ContextEncoder
 from src.world_model.loss_utils import compute_dim_weighted_mse
 
@@ -60,13 +67,16 @@ class ContextDynamicsModel(nn.Module):
         if self._has_conversion:
             assert diff_std is not None and obs_std is not None
             scale = diff_std / obs_std
-            self.register_buffer("_scale", scale)
             bias = (
                 diff_mean / obs_std
                 if diff_mean is not None
                 else torch.zeros_like(scale)
             )
-            self.register_buffer("_bias", bias)
+        else:
+            scale = None
+            bias = None
+        self.register_buffer("_scale", scale)
+        self.register_buffer("_bias", bias)
 
         # Dimension-weighted loss
         if dim_weights is not None:
@@ -76,13 +86,10 @@ class ContextDynamicsModel(nn.Module):
 
         # Nonlinear residual correction head (zero-initialized output layer)
         if residual_hidden_dim > 0:
-            out_layer = nn.Linear(residual_hidden_dim, dictionary.shape[0])
-            nn.init.normal_(out_layer.weight, std=0.01)
-            nn.init.zeros_(out_layer.bias)
-            self.residual_head: nn.Module | None = nn.Sequential(
-                nn.Linear(conditioned_encoder.shared_output_dim, residual_hidden_dim),
-                nn.Tanh(),
-                out_layer,
+            self.residual_head: nn.Module | None = build_residual_head(
+                conditioned_encoder.shared_output_dim,
+                residual_hidden_dim,
+                dictionary.shape[0],
             )
         else:
             self.residual_head = None
@@ -140,16 +147,15 @@ class ContextDynamicsModel(nn.Module):
         else:
             self._last_residual = None
 
-        # Controllable-only mode
-        if self.controllable_dims is not None:
-            delta = torch.zeros_like(state)
-            if self._has_conversion:
-                delta_raw = delta_raw * self._scale + self._bias  # ty: ignore[unsupported-operator]
-            delta[:, list(self.controllable_dims)] = delta_raw
-        else:
-            delta = delta_raw
-            if self._has_conversion:
-                delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
+        # Space conversion: diff-norm → obs-norm + controllable-only embedding
+        delta = apply_space_conversion(
+            delta_raw,
+            state,
+            self.controllable_dims,
+            self._scale,
+            self._bias,
+            self._has_conversion,
+        )
 
         next_state = state + delta
         return next_state, alpha
@@ -166,10 +172,7 @@ class ContextDynamicsModel(nn.Module):
 
     def normalize_atoms(self) -> None:
         """Normalize dictionary columns to unit L2 norm."""
-        with torch.no_grad():
-            norms = torch.norm(self.dictionary, dim=0, keepdim=True)
-            norms = torch.clamp(norms, min=1e-10)
-            self.dictionary.div_(norms)
+        _normalize_atoms(self.dictionary)
 
     def compute_loss(
         self,

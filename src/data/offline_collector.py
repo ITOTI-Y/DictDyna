@@ -7,6 +7,7 @@ import gymnasium
 import numpy as np
 from loguru import logger
 
+from src.env._share import rbc_midpoint_action
 from src.utils import sinergym_workdir
 
 with contextlib.suppress(ImportError):
@@ -99,7 +100,7 @@ class OfflineCollector:
                     if self.policy == "random":
                         action = env.action_space.sample()
                     else:
-                        action = self._rbc_action(obs, env)
+                        action = rbc_midpoint_action(env)
 
                     next_obs, reward, terminated, truncated, _ = env.step(action)
 
@@ -128,9 +129,3 @@ class OfflineCollector:
             "rewards": np.array(rewards_list, dtype=np.float32),
             "diffs": next_states_arr - states_arr,
         }
-
-    def _rbc_action(self, obs: np.ndarray, env: gymnasium.Env) -> np.ndarray:
-        """Simple rule-based control action (midpoint of action space)."""
-        low = env.action_space.low  # ty: ignore[unresolved-attribute]
-        high = env.action_space.high  # ty: ignore[unresolved-attribute]
-        return (low + high) / 2.0

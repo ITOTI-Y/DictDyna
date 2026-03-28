@@ -4,6 +4,7 @@ Runs a pure model-free SAC (no world model) to establish reward baselines.
 """
 
 import contextlib
+from collections import deque
 from pathlib import Path
 
 import gymnasium
@@ -146,7 +147,7 @@ class SACBaselineTrainer:
         episode_reward = 0.0
         episode_count = 0
         episode_rewards: list[float] = []
-        self._recent_episode_rewards: list[float] = []
+        self._recent_rewards: deque[float] = deque(maxlen=self.n_eval_episodes)
         eval_history: list[dict] = []
 
         for step in range(1, self.total_timesteps + 1):
@@ -173,7 +174,7 @@ class SACBaselineTrainer:
             if done:
                 episode_count += 1
                 episode_rewards.append(episode_reward)
-                self._recent_episode_rewards.append(episode_reward)
+                self._recent_rewards.append(episode_reward)
                 logger.info(
                     f"Episode {episode_count} | "
                     f"Step {step}/{self.total_timesteps} | "
@@ -225,17 +226,17 @@ class SACBaselineTrainer:
         }
 
     def evaluate(self) -> dict:
-        """Evaluate by recording the most recent training episode reward.
+        """Evaluate using recent training episode rewards.
 
+        Returns mean/std over the last n_eval_episodes completed episodes.
         Avoids creating a new Sinergym env instance (which can cause
         EnergyPlus SIGSEGV on concurrent instances).
         """
-        # Use accumulated episode rewards as eval metric
-        if self._recent_episode_rewards:
-            recent = self._recent_episode_rewards[-1]
+        if self._recent_rewards:
+            rewards = np.array(self._recent_rewards)
             return {
-                "mean_reward": recent,
-                "std_reward": 0.0,
+                "mean_reward": float(rewards.mean()),
+                "std_reward": float(rewards.std()),
             }
         return {"mean_reward": 0.0, "std_reward": 0.0}
 

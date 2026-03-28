@@ -27,7 +27,6 @@ class SparseCodeExploration:
         self.eta = eta
         self.decay = decay
         self._counts: dict[tuple[int, ...], int] = {}
-        self._total_updates = 0
 
     def compute_bonus(self, alpha: torch.Tensor) -> torch.Tensor:
         """Compute exploration bonus from sparse codes.
@@ -51,7 +50,6 @@ class SparseCodeExploration:
             bonus = self.eta / (count + 1) ** 0.5
             bonuses.append(bonus)
 
-        self._total_updates += alpha.shape[0]
         return torch.tensor(bonuses, device=alpha.device, dtype=alpha.dtype)
 
     def apply_decay(self) -> None:

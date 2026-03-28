@@ -1,6 +1,32 @@
 seed: 42
 device: auto
 
+paths:
+  results_dir: output/results
+  pretrained_dir: output/pretrained
+  checkpoint_dir: output/checkpoints
+  figures_dir: output/figures
+  data_dir: data/offline_rollouts
+  diffs_dir: data/processed/state_diffs
+
+defaults:
+  dict_path: output/pretrained/dict_k128.pt
+  buildings:
+    - env_name: "Eplus-5zone-hot-continuous-v1"
+      building_id: "office_hot"
+    - env_name: "Eplus-5zone-mixed-continuous-v1"
+      building_id: "office_mixed"
+    - env_name: "Eplus-5zone-cool-continuous-v1"
+      building_id: "office_cool"
+  source_buildings:
+    - env_name: "Eplus-5zone-hot-continuous-v1"
+      building_id: "office_hot"
+    - env_name: "Eplus-5zone-mixed-continuous-v1"
+      building_id: "office_mixed"
+  target_building:
+    env_name: "Eplus-5zone-cool-continuous-v1"
+    building_id: "office_cool"
+
 dictionary:
   n_atoms: 128
   sparsity_lambda: 0.1

@@ -10,6 +10,13 @@ Prediction: delta = alpha_shared @ D_shared.T + alpha_private @ D_private.T
 import torch
 import torch.nn as nn
 
+from src.world_model._share import (
+    build_residual_head,
+    topk_sparsify,
+)
+from src.world_model._share import (
+    normalize_atoms as _normalize_atoms,
+)
 from src.world_model.loss_utils import compute_dim_weighted_mse
 
 
@@ -70,10 +77,7 @@ class SharedPrivateDynamics(nn.Module):
 
     def normalize_private_atoms(self) -> None:
         """Normalize private dictionary columns to unit L2 norm."""
-        with torch.no_grad():
-            norms = torch.norm(self.private_dict, dim=0, keepdim=True)
-            norms = torch.clamp(norms, min=1e-10)
-            self.private_dict.div_(norms)
+        _normalize_atoms(self.private_dict)
 
 
 class SharedPrivateEncoder(nn.Module):
@@ -169,15 +173,7 @@ class SharedPrivateEncoder(nn.Module):
 
     def _topk(self, x: torch.Tensor, k: int) -> torch.Tensor:
         """Apply top-k sparsity with optional soft relaxation."""
-        if self.soft_topk_temperature > 0 and self.training:
-            abs_x = x.abs()
-            kth_val = abs_x.topk(k, dim=-1).values[:, -1:]
-            mask = torch.sigmoid((abs_x - kth_val) / self.soft_topk_temperature)
-            return x * mask
-        _, indices = torch.topk(x.abs(), k, dim=-1)
-        mask = torch.zeros_like(x)
-        mask.scatter_(-1, indices, 1.0)
-        return x * mask
+        return topk_sparsify(x, k, self.soft_topk_temperature, self.training)
 
     def get_shared_params(self) -> list[nn.Parameter]:
         return list(self.trunk.parameters()) + list(self.shared_head.parameters())
@@ -205,12 +201,33 @@ class SharedPrivateWorldModel(nn.Module):
         topk_private: int = 8,
         dim_weights: torch.Tensor | None = None,
         residual_hidden_dim: int = 0,
+        controllable_dims: tuple[int, ...] | None = None,
+        diff_mean: torch.Tensor | None = None,
+        diff_std: torch.Tensor | None = None,
+        obs_std: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         n_shared = shared_dict.shape[1]
+        self.controllable_dims = controllable_dims
 
         # Per-dimension MSE EMA for adaptive loss weighting
         self.register_buffer("_dim_ema", torch.ones(state_dim))
+
+        # Space conversion buffers
+        self._has_conversion = diff_std is not None and obs_std is not None
+        if self._has_conversion:
+            assert diff_std is not None and obs_std is not None
+            scale = diff_std / obs_std
+            bias = (
+                diff_mean / obs_std
+                if diff_mean is not None
+                else torch.zeros_like(scale)
+            )
+        else:
+            scale = None
+            bias = None
+        self.register_buffer("_scale", scale)
+        self.register_buffer("_bias", bias)
 
         # Dimension-weighted loss
         if dim_weights is not None:
@@ -241,13 +258,8 @@ class SharedPrivateWorldModel(nn.Module):
         hidden_dims = hidden_dims or [256, 256]
         trunk_out_dim = hidden_dims[-1]
         if residual_hidden_dim > 0:
-            out_layer = nn.Linear(residual_hidden_dim, state_dim)
-            nn.init.normal_(out_layer.weight, std=0.01)
-            nn.init.zeros_(out_layer.bias)
-            self.residual_head: nn.Module | None = nn.Sequential(
-                nn.Linear(trunk_out_dim, residual_hidden_dim),
-                nn.Tanh(),
-                out_layer,
+            self.residual_head: nn.Module | None = build_residual_head(
+                trunk_out_dim, residual_hidden_dim, state_dim
             )
         else:
             self.residual_head = None
@@ -283,6 +295,14 @@ class SharedPrivateWorldModel(nn.Module):
         else:
             self._last_residual = None
 
+        # Space conversion (full-dim delta, unlike DictDynamicsModel)
+        if self._has_conversion:
+            delta = delta * self._scale + self._bias  # ty: ignore[unsupported-operator]
+        if self.controllable_dims is not None:
+            mask = torch.zeros_like(delta)
+            mask[:, self.controllable_dims] = 1.0
+            delta = delta * mask
+
         next_state = state + delta
         alpha = torch.cat([alpha_s, alpha_p], dim=-1)
         return next_state, alpha
@@ -316,11 +336,22 @@ class SharedPrivateWorldModel(nn.Module):
         alpha_s = alpha_combined[:, :n_shared]
         alpha_p = alpha_combined[:, n_shared:]
 
+        # In controllable-only mode, compute loss only on predicted dims
+        if self.controllable_dims is not None:
+            ctrl = list(self.controllable_dims)
+            loss_pred = pred[:, ctrl]
+            loss_target = next_state[:, ctrl]
+            loss_state = state[:, ctrl]
+        else:
+            loss_pred = pred
+            loss_target = next_state
+            loss_state = state
+
         if use_dim_weighting or identity_penalty_lambda > 0:
             mse_loss, extra = compute_dim_weighted_mse(
-                pred=pred,
-                target=next_state,
-                state=state,
+                pred=loss_pred,
+                target=loss_target,
+                state=loss_state,
                 dim_ema=self._dim_ema,  # ty: ignore[invalid-argument-type]
                 ema_decay=dim_weight_ema_decay,
                 identity_penalty_lambda=identity_penalty_lambda,
@@ -328,7 +359,7 @@ class SharedPrivateWorldModel(nn.Module):
                 training=self.training,
             )
         else:
-            per_dim_sq_err = (next_state - pred) ** 2
+            per_dim_sq_err = (loss_target - loss_pred) ** 2
             if self.dim_weights is not None:
                 per_dim_sq_err = per_dim_sq_err * self.dim_weights
             per_sample_mse = per_dim_sq_err.mean(dim=-1)

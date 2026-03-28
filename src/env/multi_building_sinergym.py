@@ -5,6 +5,8 @@ import contextlib
 import gymnasium
 import numpy as np
 
+from src.env._share import rbc_midpoint_action
+
 with contextlib.suppress(ImportError):
     import sinergym  # noqa: F401
 
@@ -93,9 +95,7 @@ class MultiBuildingSinergym:
                     if policy == "random":
                         action = env.action_space.sample()
                     else:
-                        low = env.action_space.low  # ty: ignore[unresolved-attribute]
-                        high = env.action_space.high  # ty: ignore[unresolved-attribute]
-                        action = (low + high) / 2.0
+                        action = rbc_midpoint_action(env)
                     next_obs, reward, terminated, truncated, _ = env.step(action)
                     transitions.append(
                         {"s": obs, "a": action, "s_next": next_obs, "r": reward}

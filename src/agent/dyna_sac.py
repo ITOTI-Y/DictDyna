@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from loguru import logger
 
+from src.agent._share import compute_td_error_weights
 from src.agent.replay_buffer import MixedReplayBuffer
 from src.agent.rollout import ModelRollout
 from src.agent.sac import GaussianActor, SACTrainer, SoftQNetwork
@@ -235,20 +236,13 @@ class DynaSAC:
             batch = self.buffer.real_buffer.sample(self.config.batch_size, self.device)
 
             # Compute TD-error based sample weights
-            with torch.no_grad():
-                next_actions, _next_log_probs = self.actor(batch["next_states"])
-                q1_next, q2_next = self.critic_target(
-                    batch["next_states"], next_actions
-                )
-                q_next = torch.min(q1_next, q2_next)
-                target_q = (
-                    batch["rewards"]
-                    + (1.0 - batch["dones"]) * self.config.gamma * q_next
-                )
-                q1, q2 = self.critic(batch["states"], batch["actions"])
-                td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
-                # Normalize to [1, 1+beta] range
-                weights = 1.0 + td_error / (td_error.mean() + 1e-8)
+            weights = compute_td_error_weights(
+                self.actor,
+                self.critic,
+                self.critic_target,
+                batch,
+                self.config.gamma,
+            )
 
             wm_metrics = self.wm_trainer.train_step(
                 batch["states"],

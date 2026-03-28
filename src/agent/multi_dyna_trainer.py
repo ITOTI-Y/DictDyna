@@ -10,6 +10,11 @@ import numpy as np
 import torch
 from loguru import logger
 
+from src.agent._share import (
+    DEFAULT_LEARNING_STARTS,
+    compute_td_error_weights,
+    normalize_obs,
+)
 from src.agent.dyna_sac import DynaSAC
 from src.agent.replay_buffer import ReplayBuffer, TaggedReplayBuffer
 from src.agent.rollout import ModelRollout
@@ -383,9 +388,7 @@ class MultiBuildingDynaSAC:
         return self._current_env
 
     def _normalize_obs(self, raw_obs: np.ndarray) -> np.ndarray:
-        return np.clip((raw_obs - self._obs_mean) / self._obs_std, -10.0, 10.0).astype(
-            np.float32
-        )
+        return normalize_obs(raw_obs, self._obs_mean, self._obs_std)
 
     def train(self) -> dict:
         """Run multi-building training with sequential episodes.
@@ -397,7 +400,7 @@ class MultiBuildingDynaSAC:
             35040 * self.n_buildings
         )
         n_episodes_per_building = max(n_episodes_per_building, 1)
-        learning_starts = min(1000, self.config.batch_size * 2)
+        learning_starts = min(DEFAULT_LEARNING_STARTS, self.config.batch_size * 2)
 
         episode_counts: dict[str, int] = dict.fromkeys(self.building_ids, 0)
         all_episode_rewards: dict[str, list[float]] = {
@@ -599,19 +602,13 @@ class MultiBuildingDynaSAC:
                 context_expanded = context.expand(per_bld, -1)
 
                 # TD-error weights
-                with torch.no_grad():
-                    next_actions, _ = self.dyna.actor(batch["next_states"])
-                    q1_next, q2_next = self.dyna.critic_target(
-                        batch["next_states"], next_actions
-                    )
-                    q_next = torch.min(q1_next, q2_next)
-                    target_q = (
-                        batch["rewards"]
-                        + (1.0 - batch["dones"]) * self.config.gamma * q_next
-                    )
-                    q1, q2 = self.dyna.critic(batch["states"], batch["actions"])
-                    td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
-                    weights = 1.0 + td_error / (td_error.mean() + 1e-8)
+                weights = compute_td_error_weights(
+                    self.dyna.actor,
+                    self.dyna.critic,
+                    self.dyna.critic_target,
+                    batch,
+                    self.config.gamma,
+                )
 
                 self._context_wm_trainer.train_step(
                     batch["states"],
@@ -671,18 +668,13 @@ class MultiBuildingDynaSAC:
         bid_str: str,
     ) -> None:
         """World model update with TD-error weighted loss."""
-        with torch.no_grad():
-            next_actions, _ = self.dyna.actor(batch["next_states"])
-            q1_next, q2_next = self.dyna.critic_target(
-                batch["next_states"], next_actions
-            )
-            q_next = torch.min(q1_next, q2_next)
-            target_q = (
-                batch["rewards"] + (1.0 - batch["dones"]) * self.config.gamma * q_next
-            )
-            q1, q2 = self.dyna.critic(batch["states"], batch["actions"])
-            td_error = (torch.min(q1, q2) - target_q).abs().squeeze(-1)
-            weights = 1.0 + td_error / (td_error.mean() + 1e-8)
+        weights = compute_td_error_weights(
+            self.dyna.actor,
+            self.dyna.critic,
+            self.dyna.critic_target,
+            batch,
+            self.config.gamma,
+        )
         wm_trainer.train_step(
             batch["states"],
             batch["actions"],

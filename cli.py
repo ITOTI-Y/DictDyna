@@ -68,8 +68,11 @@ def collect(
         logger.error("No buildings configured. Use --config or --env.")
         raise typer.Exit(1)
 
-    output_dir = cfg.get("data", {}).get("output_path", "data/offline_rollouts")
-    diffs_dir = "data/processed/state_diffs"
+    paths = cfg.get("paths", {})
+    output_dir = cfg.get("data", {}).get(
+        "output_path", paths.get("data_dir", "data/offline_rollouts")
+    )
+    diffs_dir = paths.get("diffs_dir", "data/processed/state_diffs")
 
     collector = OfflineCollector(
         building_configs=buildings,
@@ -110,15 +113,15 @@ def pretrain(
     from src.dictionary.pretrain import pretrain_dictionary
 
     dict_cfg = cfg.get("dictionary", {})
-    data_cfg = cfg.get("data", {})
-    output_cfg = cfg.get("output", {})
+    paths = cfg.get("paths", {})
+    defaults = cfg.get("defaults", {})
 
     pretrain_dictionary(
-        data_dir=data_cfg.get("output_path", "data/processed/state_diffs"),
+        data_dir=paths.get("diffs_dir", "data/processed/state_diffs"),
         n_atoms=dict_cfg.get("n_atoms", 128),
         method=method,
         max_iter=dict_cfg.get("pretrain_epochs", 100),
-        output_path=output_cfg.get("dict_path", "output/pretrained/dict.pt"),
+        output_path=defaults.get("dict_path", "output/pretrained/dict.pt"),
         buildings=buildings,
     )
     logger.info("Dictionary pretraining complete")
@@ -173,7 +176,7 @@ def train(
         dict_path=dict_path,
         config=train_cfg,
         seed=seed,
-        save_dir=f"output/results/dyna_sac/{tag}_s{seed}",
+        save_dir=f"{cfg.get('paths', {}).get('results_dir', 'output/results')}/dyna_sac/{tag}_s{seed}",
         wandb_project=wandb_project,
     )
     result = trainer.train()
@@ -216,24 +219,17 @@ def multi_train(
     train_fields["device"] = cfg.get("device", "auto")
     train_cfg = TrainSchema(**train_fields)
 
-    # Default 3 office buildings
-    env_cfg = cfg.get("env", {})
-    buildings = env_cfg.get(
-        "buildings",
-        [
-            {"env_name": "Eplus-5zone-hot-continuous-v1", "building_id": "office_hot"},
-            {
-                "env_name": "Eplus-5zone-mixed-continuous-v1",
-                "building_id": "office_mixed",
-            },
-            {
-                "env_name": "Eplus-5zone-cool-continuous-v1",
-                "building_id": "office_cool",
-            },
-        ],
-    )
+    # Buildings from config
+    defaults = cfg.get("defaults", {})
+    buildings = cfg.get("env", {}).get("buildings") or defaults.get("buildings", [])
+    if not buildings:
+        logger.error(
+            "No buildings configured. Use --config with env.buildings or defaults.buildings."
+        )
+        raise typer.Exit(1)
 
-    save_dir = f"output/results/multi_dyna/{mode}_s{seed}"
+    results_dir = cfg.get("paths", {}).get("results_dir", "output/results")
+    save_dir = f"{results_dir}/multi_dyna/{mode}_s{seed}"
     trainer = MultiBuildingDynaSAC(
         building_configs=buildings,
         dict_path=dict_path,
@@ -275,16 +271,17 @@ def transfer(
     train_fields["device"] = cfg.get("device", "auto")
     train_cfg = TrainSchema(**train_fields)
 
-    # Source: hot + mixed, Target: cool
-    source = [
-        {"env_name": "Eplus-5zone-hot-continuous-v1", "building_id": "office_hot"},
-        {"env_name": "Eplus-5zone-mixed-continuous-v1", "building_id": "office_mixed"},
-    ]
-    target = {
-        "env_name": "Eplus-5zone-cool-continuous-v1",
-        "building_id": "office_cool",
-    }
+    # Source/target buildings from config
+    defaults = cfg.get("defaults", {})
+    source = defaults.get("source_buildings", [])
+    target = defaults.get("target_building", {})
+    if not source or not target:
+        logger.error(
+            "No source/target buildings configured. Set defaults.source_buildings and defaults.target_building in config."
+        )
+        raise typer.Exit(1)
 
+    results_dir = cfg.get("paths", {}).get("results_dir", "output/results")
     experiment = FewShotTransferExperiment(
         source_configs=source,
         target_config=target,
@@ -292,7 +289,7 @@ def transfer(
         config=train_cfg,
         adaptation_days=[1, 3, 7],
         seed=seed,
-        save_dir=f"output/results/transfer/{tag + '_' if tag else ''}s{seed}",
+        save_dir=f"{results_dir}/transfer/{tag + '_' if tag else ''}s{seed}",
         context_mode=context,
     )
     results = experiment.run()
@@ -334,7 +331,7 @@ def baseline(
             env_name=env_name,
             n_episodes=n_episodes,
             seed=seed,
-            save_dir=f"output/results/baseline_rbc/{env_name}",
+            save_dir=f"{cfg.get('paths', {}).get('results_dir', 'output/results')}/baseline_rbc/{env_name}",
         )
         result = runner.evaluate()
         logger.info(
@@ -352,7 +349,7 @@ def baseline(
             hidden_dims=sac_cfg.get("hidden_dims", [256, 256]),
             gamma=cfg.get("training", {}).get("gamma", 0.99),
             eval_freq=cfg.get("training", {}).get("eval_freq", 8760),
-            save_dir=f"output/results/baseline_sac/{env_name}_s{seed}",
+            save_dir=f"{cfg.get('paths', {}).get('results_dir', 'output/results')}/baseline_sac/{env_name}_s{seed}",
             device=cfg.get("device", "auto"),
             wandb_project=wandb_project,
         )
