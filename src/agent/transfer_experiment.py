@@ -511,15 +511,18 @@ class FewShotTransferExperiment:
             dtype=torch.float32,
         )
 
-        # Fresh Dyna-SAC with random dictionary + random encoder (true scratch)
+        # Fresh Dyna-SAC with random dictionary (true scratch, dict mode)
         random_dict = torch.randn_like(self.dictionary)
         random_dict = random_dict / random_dict.norm(dim=0, keepdim=True)
+
+        # Scratch baseline uses dict mode (no context, no transfer knowledge)
+        scratch_config = self.config.model_copy(update={"mode": "dict"})
         dyna = DynaSAC(
             state_dim=self.state_dim,
             action_dim=self.action_dim,
             building_ids=["scratch"],
             dictionary=random_dict,
-            config=self.config,
+            config=scratch_config,
             action_scale=self.action_scale,
             action_bias=self.action_bias,
             obs_mean=target_obs_mean,

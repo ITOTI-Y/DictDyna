@@ -50,8 +50,6 @@ wm_loss:
   identity_penalty_lambda: 0.5
   grad_clip_norm: 1.0
   grad_clip_dict_norm: 0.1
-  probabilistic: false
-  uncertainty_penalty: 1.0
 
 dyna:
   rollout_horizon: 1
