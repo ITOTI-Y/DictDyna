@@ -672,6 +672,50 @@ Applied Energy（首选）/ AAAI 2027（备选）
 
 **论文叙事更新**：「冻结共享字典 + 全数据 context 推断 → 保护跨建筑知识的同时最大化 target 适配，7d 迁移优势从 40% 提升到 64%」
 
+#### J 组：WM Rollout 贡献消融（3-seed，2026-03-29 ~ 03-30）
+
+**动机**：I 组 transfer 优势 +50~70%，但无法确认优势来自世界模型（WM rollout）还是 policy transfer（source 训练的 actor/critic）。需要消融实验分离两者贡献。
+
+**实验设计**：
+- **A. Transfer + rollout**：完整方法（source WM + rollout 数据增强 + SAC 更新）
+- **B. Transfer - rollout**：同 A 但 SAC 仅用 real data，无 model rollout
+- **C. Scratch + rollout**：全新随机 actor/critic + 随机字典 + rollout
+
+WM rollout 贡献 = A - B，Policy transfer 贡献 = B - C
+
+**发现的关键 Bug**：`_run_context_transfer` 中 `dyna = copy.deepcopy(source_dyna)` 后又**从零新建** ContextDynamicsModel 替换了 source 训练好的 WM。context_encoder、conditioned_encoder 全部随机重初始化，仅复用 pretrained dictionary（非 source 微调后的 dictionary）。source WM 训练 ~70K 步的知识被完全丢弃。
+
+**Bug 修复**：直接继承 `source_dyna.world_model`（已训练的 ContextDynamicsModel），仅在 target 数据上 fine-tune context_encoder + conditioned_encoder。
+
+**修复前结果（WM 从零新建，3-seed）**：
+
+| 数据量 | A (有rollout) | B (无rollout) | WM rollout 贡献 | 结论 |
+|--------|-------------|--------------|----------------|------|
+| 1d | -8982±560 | -7717±371 | **-10%（有害）** | rollout 质量差，破坏训练 |
+| 3d | -9916±1385 | -7549±730 | **-22%（有害）** | 随机 WM 的 rollout 是毒药 |
+| 7d | -9284±353 | -8038±476 | **-11%（有害）** | 全数据量一致有害 |
+
+**修复后结果（继承 source WM，3-seed）**：
+
+| 数据量 | A (有rollout) | B (无rollout) | C (scratch) | WM rollout | Policy transfer |
+|--------|-------------|--------------|-------------|-----------|----------------|
+| 1d | **-7361±279** | -7520±1221 | -21694±4806 | **+1%（中性）** | **99%** |
+| 3d | -7797±965 | -7640±743 | -17144±2819 | **-2%（中性）** | **102%** |
+| 7d | -7683±717 | -7649±504 | -19428±2541 | **-0%（中性）** | **100%** |
+
+**结论**：
+1. **Bug 修复有效**：继承 source WM 后，rollout 从「有害」变为「中性」
+2. **Transfer 优势 100% 来自 policy transfer**：source 训练的 actor/critic 是全部贡献来源
+3. **WM rollout 在 transfer 阶段不提供额外价值**（A ≈ B，差异在 ±2% 噪声范围内）
+4. **WM 的价值在 source 训练阶段**：通过 Dyna rollout 帮助 SAC 在 source 建筑上学到更好的 policy，这个 policy 才是 transfer 的核心资产
+5. **Transfer reward 改善**：修复后 A 从 -8982/-9916/-9284 提升到 -7361/-7797/-7683
+
+**对论文叙事的影响**：
+- ❌ 不能说「WM rollout 在 transfer 时提供数据增强」
+- ✅ 应强调「WM 通过 Dyna planning 在 source 阶段训练出高质量 policy，该 policy 可直接 transfer」
+- ✅ 「共享字典 + context encoder = 跨建筑 WM 知识载体，确保 source 训练的 policy 泛化到 target」
+- ✅ 「Transfer 阶段无需 rollout，简化部署——只需 policy forward pass + context inference」
+
 ---
 
 ## 技术栈

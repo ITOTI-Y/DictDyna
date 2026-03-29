@@ -17,9 +17,8 @@ from loguru import logger
 
 from src.agent._share import normalize_obs
 from src.agent.dyna_sac import DynaSAC
-from src.obs_config import OBS_CONFIG
 from src.schemas import TrainSchema
-from src.utils import build_dim_weights, get_device, seed_everything, sinergym_workdir
+from src.utils import get_device, seed_everything, sinergym_workdir
 
 with contextlib.suppress(ImportError):
     import sinergym  # noqa: F401
@@ -349,59 +348,13 @@ class FewShotTransferExperiment:
     def _run_context_transfer(
         self, source_dyna: DynaSAC, target_data: dict, n_adapt_steps: int
     ) -> float:
-        """Context-conditioned transfer: infer z from target data, no fine-tuning."""
+        """Context-conditioned transfer: inherit source WM, fine-tune on target."""
         import copy
 
-        from src.world_model.context_dynamics import ContextDynamicsModel
-        from src.world_model.context_encoder import (
-            ContextConditionedEncoder,
-            ContextEncoder,
-        )
-
         dyna = copy.deepcopy(source_dyna)
-
-        # Build context model reusing source dictionary
-        ctx_cfg = self.config.context
-        ctx_enc = ContextEncoder(
-            self.state_dim, self.action_dim, ctx_cfg.context_dim, ctx_cfg.hidden_dims
-        ).to(self.device)
-        cond_enc = ContextConditionedEncoder(
-            self.state_dim,
-            self.action_dim,
-            ctx_cfg.context_dim,
-            self.config.dictionary.n_atoms,
-            shared_hidden_dims=self.config.encoder.shared_hidden_dims,
-            topk_k=self.config.encoder.topk_k,
-        ).to(self.device)
-        dim_weights = build_dim_weights(
-            self.state_dim,
-            self.config.dictionary.reward_dims,
-            self.config.dictionary.reward_dim_weight,
-            self.device,
-        )
-        ctx_model = ContextDynamicsModel(
-            dictionary=self.dictionary.to(self.device),
-            context_encoder=ctx_enc,
-            conditioned_encoder=cond_enc,
-            learnable_dict=True,
-            dim_weights=dim_weights,
-            residual_hidden_dim=self.config.wm_loss.residual_hidden_dim,
-            controllable_dims=OBS_CONFIG.CONTROLLABLE
-            if self.config.dictionary.controllable_only
-            else None,
-        ).to(self.device)
-
-        # Replace DynaSAC's world model and rollout gen
-        dyna.world_model = ctx_model
-        from src.agent.rollout import ModelRollout
-
-        dyna.rollout_gen = ModelRollout(
-            world_model=ctx_model,
-            actor=dyna.actor,
-            reward_estimator=dyna.reward_estimator,
-            exploration=dyna.exploration,
-            device=self.device,
-        )
+        # dyna.world_model is the SOURCE-TRAINED ContextDynamicsModel
+        # (context_encoder + conditioned_encoder + dictionary all trained on source)
+        ctx_model = dyna.world_model
 
         # Build context from ALL sampled target transitions (not just first K)
         total = len(target_data["states"])
@@ -499,6 +452,93 @@ class FewShotTransferExperiment:
             batch = dyna.buffer.sample(
                 batch_size, model_ratio=ratio, device=self.device
             )
+            dyna.sac_trainer.update(
+                batch["states"],
+                batch["actions"],
+                batch["rewards"],
+                batch["next_states"],
+                batch["dones"],
+            )
+
+        eval_reward = self._evaluate_on_target(dyna, "0")
+        return eval_reward
+
+    def _run_context_transfer_no_rollout(
+        self, source_dyna: DynaSAC, target_data: dict, n_adapt_steps: int
+    ) -> float:
+        """Context transfer WITHOUT model rollouts (ablation B).
+
+        Same as _run_context_transfer but SAC trains on real data only.
+        Isolates policy-transfer contribution from WM-rollout contribution.
+        """
+        import copy
+
+        dyna = copy.deepcopy(source_dyna)
+        ctx_model = dyna.world_model
+
+        # Context inference + fine-tune (same as full transfer)
+        total = len(target_data["states"])
+        indices = np.linspace(0, total - 1, n_adapt_steps, dtype=int)
+
+        s_ctx = target_data["states"][indices]
+        a_ctx = target_data["actions"][indices]
+        sn_ctx = target_data["next_states"][indices]
+        delta_ctx = sn_ctx - s_ctx
+        transitions = np.concatenate([s_ctx, a_ctx, delta_ctx], axis=-1)
+        transitions_t = torch.tensor(
+            transitions, dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            target_context = ctx_model.infer_context(transitions_t)
+
+        if n_adapt_steps >= 50:
+            adapt_s = torch.tensor(target_data["states"][indices], device=self.device)
+            adapt_a = torch.tensor(target_data["actions"][indices], device=self.device)
+            adapt_sn = torch.tensor(
+                target_data["next_states"][indices], device=self.device
+            )
+            context_expanded = target_context.expand(len(indices), -1)
+            if isinstance(ctx_model.dictionary, torch.nn.Parameter):
+                ctx_model.dictionary.requires_grad_(False)
+            encoder_params = list(ctx_model.context_encoder.parameters()) + list(
+                ctx_model.encoder.parameters()
+            )
+            optimizer = torch.optim.Adam(encoder_params, lr=1e-3)
+            for _epoch in range(20):
+                ctx_model.train()
+                target_context = ctx_model.infer_context(transitions_t)
+                context_expanded = target_context.expand(len(indices), -1)
+                loss, _ = ctx_model.compute_loss(
+                    adapt_s,
+                    adapt_a,
+                    adapt_sn,
+                    context=context_expanded,
+                    sparsity_lambda=0.1,
+                )
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            if isinstance(ctx_model.dictionary, torch.nn.Parameter):
+                ctx_model.dictionary.requires_grad_(True)
+            with torch.no_grad():
+                target_context = ctx_model.infer_context(transitions_t)
+
+        # Fill buffer with sampled target data
+        for i in indices:
+            dyna.buffer.add_real(
+                target_data["states"][i],
+                target_data["actions"][i],
+                target_data["rewards"][i],
+                target_data["next_states"][i],
+                False,
+            )
+
+        # SAC updates WITHOUT rollouts — real data only
+        batch_size = min(64, n_adapt_steps)
+        n_sac_updates = 200
+        for _step in range(n_sac_updates):
+            batch = dyna.buffer.real_buffer.sample(batch_size, self.device)
             dyna.sac_trainer.update(
                 batch["states"],
                 batch["actions"],
