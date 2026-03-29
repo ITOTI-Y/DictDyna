@@ -403,29 +403,27 @@ class FewShotTransferExperiment:
             device=self.device,
         )
 
-        # Build context from uniformly sampled target transitions
+        # Build context from ALL sampled target transitions (not just first K)
         total = len(target_data["states"])
         indices = np.linspace(0, total - 1, n_adapt_steps, dtype=int)
 
-        # Use first K transitions for context inference
-        ctx_window = min(self.config.context.context_window, n_adapt_steps)
-        ctx_indices = indices[:ctx_window]
-        s_ctx = target_data["states"][ctx_indices]
-        a_ctx = target_data["actions"][ctx_indices]
-        sn_ctx = target_data["next_states"][ctx_indices]
+        s_ctx = target_data["states"][indices]
+        a_ctx = target_data["actions"][indices]
+        sn_ctx = target_data["next_states"][indices]
         delta_ctx = sn_ctx - s_ctx
 
-        # Build transition tensor: (1, K, 2*d + m)
+        # Build transition tensor: (1, N, 2*d + m) — use all available data
         transitions = np.concatenate([s_ctx, a_ctx, delta_ctx], axis=-1)
         transitions_t = torch.tensor(
             transitions, dtype=torch.float32, device=self.device
         ).unsqueeze(0)
 
-        # Infer context (zero-shot)
+        # Infer context (zero-shot, mean-pooled over all transitions)
         with torch.no_grad():
             target_context = ctx_model.infer_context(transitions_t)  # (1, context_dim)
 
-        # Optional: fine-tune context encoder on target data if enough data
+        # Optional: fine-tune ONLY context encoder on target data
+        # Dictionary and conditioned encoder are frozen to preserve source knowledge
         if n_adapt_steps >= 50:
             adapt_s = torch.tensor(target_data["states"][indices], device=self.device)
             adapt_a = torch.tensor(target_data["actions"][indices], device=self.device)
@@ -434,7 +432,15 @@ class FewShotTransferExperiment:
             )
             context_expanded = target_context.expand(len(indices), -1)
 
-            optimizer = torch.optim.Adam(ctx_model.parameters(), lr=1e-3)
+            # Freeze dictionary only (preserve source thermal dynamics)
+            # Both encoders (context + conditioned) are jointly trainable
+            if isinstance(ctx_model.dictionary, torch.nn.Parameter):
+                ctx_model.dictionary.requires_grad_(False)
+
+            encoder_params = list(ctx_model.context_encoder.parameters()) + list(
+                ctx_model.encoder.parameters()
+            )
+            optimizer = torch.optim.Adam(encoder_params, lr=1e-3)
             for _epoch in range(20):
                 ctx_model.train()
                 # Re-infer context each epoch (encoder improves)
@@ -450,7 +456,10 @@ class FewShotTransferExperiment:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                ctx_model.normalize_atoms()
+
+            # Restore dictionary grad flag
+            if isinstance(ctx_model.dictionary, torch.nn.Parameter):
+                ctx_model.dictionary.requires_grad_(True)
 
             # Final context after fine-tuning
             with torch.no_grad():
@@ -467,8 +476,9 @@ class FewShotTransferExperiment:
             )
 
         # SAC updates with context-conditioned rollouts
+        # Fixed 200 updates: more data improves batch diversity, not update count
         batch_size = min(64, n_adapt_steps)
-        n_sac_updates = max(200, 200 * n_adapt_steps // 96)
+        n_sac_updates = 200
         for step in range(n_sac_updates):
             if n_adapt_steps >= batch_size and step >= 50:
                 start = dyna.buffer.real_buffer.sample(5, self.device)
@@ -561,8 +571,9 @@ class FewShotTransferExperiment:
             )
 
         # SAC updates with rollouts (SAME as transfer for fairness)
+        # Fixed 200 updates: more data improves batch diversity, not update count
         batch_size = min(64, n_steps)
-        n_sac_updates = max(200, 200 * n_steps // 96)  # scale with data
+        n_sac_updates = 200
         for step in range(n_sac_updates):
             # Generate rollouts (same as transfer)
             if n_steps >= batch_size and step >= 50:

@@ -375,7 +375,8 @@ Applied Energy（首选）/ AAAI 2027（备选）
 | 方法 | 1d 优势 | 3d 优势 | 7d 优势 | 架构 |
 |------|---------|---------|---------|------|
 | Adapter (fine-tune 50ep) | +56.9±5.4% | +30.3±2.3% | +29.6±11.6% | ModuleDict + building_id |
-| **Context (零泄露)** | **+59.9±5.1%** | **+56.6±6.3%** | **+39.7±0.8%** | **ContextEncoder + z∈R^16** |
+| Context (Phase 4) | +59.9±5.1% | +56.6±6.3% | +39.7±0.8% | ContextEncoder + z∈R^16 |
+| **Context (Phase 6 调优)** | **+70.7±4.0%** | **+52.8±2.5%** | **+64.4±5.1%** | **冻结字典 + 全数据 context + 固定 SAC 步数** |
 
 ---
 
@@ -619,6 +620,60 @@ Applied Energy（首选）/ AAAI 2027（备选）
 
 ---
 
+### Phase 6 代码重构 + Transfer 调优（2026-03-28 ~ 03-29）
+
+#### 架构统一：Context 为默认
+
+**重构内容**：
+- 提取 `BaseDictDynamics` 抽象基类，消除 Dict/Context 两模型间 ~300 行重复代码
+- 统一 `WorldModelTrainer`（合并 `ContextWorldModelTrainer`），支持 `**kwargs` 路由
+- 创建 `factory.py`（`build_world_model` + `build_trainer`）集中模型构建
+- `DynaSAC` 原生支持 context/dict 双模式，默认 `mode="context"`
+- 删除废弃模块：SharedPrivateDynamics、ProbabilisticDictDynamics、AdapterTransfer
+- 净减少 **1005 行**代码（+740 / -1745）
+
+**在线验证**：单建筑 context 模式 Ep1=-7533（office_hot，Docker/Sinergym）
+
+#### I 组：Transfer 实验调优（3-seed 验证）
+
+**发现的三个问题**：
+
+1. **SAC 更新次数线性膨胀**：`n_sac_updates = max(200, 200*n_steps//96)` → 7d 有 1400 次 SAC 更新但仅 672 条真实数据，过拟合
+2. **Context fine-tuning 优化全部参数**：`Adam(ctx_model.parameters())` 破坏预训练字典的共享热动态知识
+3. **Context 推断仅用前 10 条 transition**：未利用全部可用数据
+
+**修复**：
+- Fix #1：SAC 更新固定 200 次（更多数据提高 batch 多样性而非增加训练步数）
+- Fix #2：冻结 dictionary，仅训练 context_encoder + conditioned_encoder
+- Fix #3：context 推断使用全部采样数据（ContextEncoder 的 mean-pooling 支持可变长度输入）
+
+**3-seed 结果（seeds=42/123/7，Source-Only Dict，零泄露）**：
+
+| 数据量 | Transfer (mean±std) | Scratch (mean±std) | 优势 (mean±std) |
+|--------|--------------------|--------------------|-----------------|
+| 1 天 | **-6444±732** | -22106±807 | **+70.7±4.0%** |
+| 3 天 | -9011±898 | -19060±1341 | +52.8±2.5% |
+| 7 天 | **-6986±204** | -20151±3801 | **+64.4±5.1%** |
+
+**与 Phase 4 原始结果对比**：
+
+| 数据量 | Phase 4 优势 | Phase 6 优势 | 改善 |
+|--------|-------------|-------------|------|
+| 1d | +59.9±5.1% | **+70.7±4.0%** | +10.8pp |
+| 3d | +56.6±6.3% | +52.8±2.5% | -3.8pp |
+| 7d | +39.7±0.8% | **+64.4±5.1%** | **+24.7pp** |
+
+**关键发现**：
+- **7d 优势从 +39.7% 提升到 +64.4%**：修复全参数 fine-tuning + SAC 过拟合后大幅改善
+- **7d transfer reward 极稳定**：-6986±204（std 仅 204）
+- **1d 优势 +70.7%**：全数据 context 推断（mean-pool 96 条 vs 之前仅 10 条）显著提升 zero-shot 质量
+- **3d 是中间凹陷区域**：288 条对 encoder 联合训练而言处于尴尬区间，比 96 条多样性增益有限但 fine-tuning 已足以过拟合
+- **所有 9 个 seed×day 组合均 Transfer > Scratch**（min=+50.2%, max=+76.1%）
+
+**论文叙事更新**：「冻结共享字典 + 全数据 context 推断 → 保护跨建筑知识的同时最大化 target 适配，7d 迁移优势从 40% 提升到 64%」
+
+---
+
 ## 技术栈
 
 | 类别 | 工具 | 版本 |
@@ -670,6 +725,7 @@ World Model: obs_norm + D·α = obs'_norm        Reward Estimator: denorm(obs'_n
 | Phase 3 | 多建筑共享字典 | ✅ Ep1 +5.2%（sample efficiency），总体 +1.7% |
 | Phase 4 | Few-shot transfer | ✅ Context mode (零泄露): **+40~60%** vs scratch |
 | Phase 5 | 消融实验 | ✅ 组件/超参数/context_dim/dim-weight 消融完成 |
+| Phase 6 | 代码重构 + Transfer 调优 | ✅ Context 为默认架构，Transfer 1d +71% / 7d +64% |
 
 ---
 
