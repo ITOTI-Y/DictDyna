@@ -338,7 +338,88 @@ Applied Energy（首选）/ AAAI 2027（备选）
 
 ---
 
-## 实验结果
+## Results
+
+本章汇总全部实验结论。详细过程见后续各 Phase 记录。
+
+### 1. 单建筑 MBRL 性能（Eplus-5zone-hot, seed=42）
+
+| 方法 | Ep1 | Ep3 | vs RBC | 备注 |
+|------|-----|-----|--------|------|
+| RBC (rule-based) | -18397 | — | — | 固定规则基线 |
+| SAC baseline | -7448 | -5965 | +68% | 纯 model-free |
+| **Dyna-SAC** (topk, 88% sparse) | -7292 | -5470 | +70% | MBPO-style, H=1 |
+| **Dyna-SAC + reward-weight + exploration** | -7678 | **-5051** | **+73%** | 最优单建筑配置 |
+
+### 2. 多建筑共享字典 vs 独立字典（3 建筑, seed=42）
+
+| 对比 | Ep1 Mean | Ep3 Mean | Winner |
+|------|----------|----------|--------|
+| Shared D (预训练) | **-6958** | -5499 | **Ep1 +5.2%** (sample efficiency) |
+| Independent D (随机) | -7340 | **-5345** | Ep3 -2.8% (充分训练后独立更优) |
+
+### 3. Few-shot Transfer：Source→Target（3-seed, 零泄露）
+
+| 方法 | 1d 优势 | 3d 优势 | 7d 优势 | 架构 |
+|------|---------|---------|---------|------|
+| Adapter fine-tune | +56.9±5.4% | +30.3±2.3% | +29.6±11.6% | ModuleDict + building_id |
+| Context (Phase 4 原始) | +59.9±5.1% | +56.6±6.3% | +39.7±0.8% | ContextEncoder + z∈R^16 |
+| **Context (Phase 6 调优)** | **+70.7±4.0%** | **+52.8±2.5%** | **+64.4±5.1%** | 冻结字典 + 全数据 context |
+
+Phase 6 调优改动：① 冻结字典保护 source 知识 ② 全数据 context 推断 ③ 固定 SAC 200 步
+
+### 4. 消融实验汇总
+
+#### 4.1 组件消融（单建筑 hot, 3-seed Ep3 mean±std）
+
+| 变体 | Ep3 Mean±Std | vs Baseline | 结论 |
+|------|-------------|-------------|------|
+| **Baseline** (Dyna-SAC, dict_lr=1e-5) | **-5241±194** | — | — |
+| Fixed Dict (dict_lr=0) | -11207±5573 | -114% | 字典微调不可或缺 |
+| Random Dict (无预训练) | -5428 | +0.5% | 预训练 D 贡献微弱 |
+| No Rollout | -5547 | -1.7% | Rollout 贡献微弱 |
+| SAC Only (无 WM) | -5575 | -2.2% | WM 整体贡献 ~2% |
+
+#### 4.2 超参数消融（单建筑 hot, seed=42）
+
+| 参数 | 最优值 | 结论 |
+|------|--------|------|
+| K (atoms) | **128** | K=64 略差 (-1.6%), K=256 3-seed 未复现 |
+| topk_k | **16** (87.5% sparse) | topk=8 有害 (-6.8%), topk=32 微增 (+3.0%) |
+| context_dim | **16** | dim=8 也好 (57.6%), dim=4 太小, dim=32 无收益 |
+| dim_weight | **20x** | 4-seed +4.1%, std 降低 63% |
+
+#### 4.3 WM 训练改进在线验证（单建筑 hot, seed=42）
+
+| 改进 | 离线 MSE | 在线 Ep3 | 结论 |
+|------|---------|---------|------|
+| Static w=20 + GradClip | — | **-5173** | **最优** |
+| + LayerNorm | -5.2% | -5583 (-7.9%) | 离线好 → 在线差 |
+| EMA + Identity Guard | -3.4% | -5388 (-4.2%) | 无正面贡献 |
+| Residual Head (Tanh, std=0.01) | — | -5150 | 追平 baseline, 无增益 |
+| Controllable-only (4 dim) | -74% MSE | -5411 (-4.6%) | MSE 好但 RL 差 |
+
+#### 4.4 Transfer 贡献分解（3-seed, J+K 组消融）
+
+| 组件 | 贡献 | 证据 |
+|------|------|------|
+| **SAC policy transfer** (actor/critic 权重) | **~100%** | J 组: B (-7520~-7649) >> C (-17144~-21694) |
+| Transfer 阶段 WM rollout | **0%** | J 组: A ≈ B (差异 ±2%) |
+| Source 阶段 WM rollout | **不显著** | K 组: B ≈ D (差异 -5.8%~+9.4%, 高方差) |
+
+**结论**：Transfer 优势 (~60%) **全部来自 SAC policy 权重迁移**，WM rollout 在 transfer 和 source 阶段均无显著贡献。
+
+### 5. 核心发现
+
+1. **字典微调是关键**：冻结字典 → 训练崩溃 (-114%)，但预训练 D vs 随机 D 几乎无差 (+0.5%)
+2. **WM 精度 ≠ RL 性能**：离线 MSE 改善不等于在线 RL 改善（LayerNorm: MSE -5.2%, Ep3 -7.9%）
+3. **Transfer 优势来自 policy 而非 rollout**：消融证明 WM rollout 贡献为零，~60% 优势 100% 来自 source-trained actor/critic
+4. **Context > Adapter**：连续 z ∈ R^16 替代离散 adapter，1d +70.7%, 7d +64.4%
+5. **WM 的实际价值**：提供统一的跨建筑表征框架，使得同一 policy 能泛化到不同建筑
+
+---
+
+## 实验结果（详细记录）
 
 ### Phase 2 单建筑 MBRL（Eplus-5zone-hot-continuous-v1，3 episodes = 105120 步）
 
