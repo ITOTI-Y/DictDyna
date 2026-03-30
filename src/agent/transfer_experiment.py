@@ -330,18 +330,18 @@ class FewShotTransferExperiment:
         n_buildings = len(self.source_configs)
         target_idx = str(n_buildings)
 
-        dyna.world_model.encoder.add_adapter(target_idx)
+        dyna.world_model.encoder.add_adapter(target_idx)  # ty: ignore[call-non-callable, unresolved-attribute]
         # Warm-start adapter from first source building
         src_adapter_id = "0"
-        if src_adapter_id in dyna.world_model.encoder.adapters:
-            src_state = dyna.world_model.encoder.adapters[src_adapter_id].state_dict()
-            dyna.world_model.encoder.adapters[target_idx].load_state_dict(src_state)
+        if src_adapter_id in dyna.world_model.encoder.adapters:  # ty: ignore[unsupported-operator, unresolved-attribute]
+            src_state = dyna.world_model.encoder.adapters[src_adapter_id].state_dict()  # ty: ignore[not-subscriptable, unresolved-attribute, invalid-argument-type]
+            dyna.world_model.encoder.adapters[target_idx].load_state_dict(src_state)  # ty: ignore[not-subscriptable, unresolved-attribute, invalid-argument-type]
         dyna.world_model.encoder.to(self.device)
 
         # Step 1: Fine-tune WM adapter on limited data
         for param in dyna.world_model.parameters():
             param.requires_grad_(False)
-        for param in dyna.world_model.encoder.adapters[target_idx].parameters():
+        for param in dyna.world_model.encoder.adapters[target_idx].parameters():  # ty: ignore[not-subscriptable, unresolved-attribute, invalid-argument-type]
             param.requires_grad_(True)
 
         # Uniformly sample across the full episode (not just first N steps)
@@ -353,7 +353,7 @@ class FewShotTransferExperiment:
         adapt_sn = torch.tensor(target_data["next_states"][indices], device=self.device)
 
         optimizer = torch.optim.Adam(
-            dyna.world_model.encoder.adapters[target_idx].parameters(),
+            dyna.world_model.encoder.adapters[target_idx].parameters(),  # ty: ignore[not-subscriptable, unresolved-attribute, invalid-argument-type]
             lr=1e-3,
         )
         for _epoch in range(50):
@@ -462,7 +462,7 @@ class FewShotTransferExperiment:
 
         # Infer context (zero-shot, mean-pooled over all transitions)
         with torch.no_grad():
-            target_context = ctx_model.infer_context(transitions_t)  # (1, context_dim)
+            target_context = ctx_model.infer_context(transitions_t)  # (1, context_dim)  # ty: ignore[call-non-callable]
 
         # Optional: fine-tune ONLY context encoder on target data
         # Dictionary and conditioned encoder are frozen to preserve source knowledge
@@ -479,14 +479,14 @@ class FewShotTransferExperiment:
             if isinstance(ctx_model.dictionary, torch.nn.Parameter):
                 ctx_model.dictionary.requires_grad_(False)
 
-            encoder_params = list(ctx_model.context_encoder.parameters()) + list(
-                ctx_model.encoder.parameters()
+            encoder_params = list(ctx_model.context_encoder.parameters()) + list(  # ty: ignore[unresolved-attribute]
+                ctx_model.encoder.parameters()  # ty: ignore[unresolved-attribute]
             )
             optimizer = torch.optim.Adam(encoder_params, lr=1e-3)
             for _epoch in range(20):
                 ctx_model.train()
                 # Re-infer context each epoch (encoder improves)
-                target_context = ctx_model.infer_context(transitions_t)
+                target_context = ctx_model.infer_context(transitions_t)  # ty: ignore[call-non-callable]
                 context_expanded = target_context.expand(len(indices), -1)
                 loss, _ = ctx_model.compute_loss(
                     adapt_s,
@@ -505,7 +505,7 @@ class FewShotTransferExperiment:
 
             # Final context after fine-tuning
             with torch.no_grad():
-                target_context = ctx_model.infer_context(transitions_t)
+                target_context = ctx_model.infer_context(transitions_t)  # ty: ignore[call-non-callable]
 
         # Fill buffer with sampled target data
         for i in indices:
@@ -577,7 +577,7 @@ class FewShotTransferExperiment:
         ).unsqueeze(0)
 
         with torch.no_grad():
-            target_context = ctx_model.infer_context(transitions_t)
+            target_context = ctx_model.infer_context(transitions_t)  # ty: ignore[call-non-callable]
 
         if n_adapt_steps >= 50:
             adapt_s = torch.tensor(target_data["states"][indices], device=self.device)
@@ -588,13 +588,13 @@ class FewShotTransferExperiment:
             context_expanded = target_context.expand(len(indices), -1)
             if isinstance(ctx_model.dictionary, torch.nn.Parameter):
                 ctx_model.dictionary.requires_grad_(False)
-            encoder_params = list(ctx_model.context_encoder.parameters()) + list(
-                ctx_model.encoder.parameters()
+            encoder_params = list(ctx_model.context_encoder.parameters()) + list(  # ty: ignore[unresolved-attribute]
+                ctx_model.encoder.parameters()  # ty: ignore[unresolved-attribute]
             )
             optimizer = torch.optim.Adam(encoder_params, lr=1e-3)
             for _epoch in range(20):
                 ctx_model.train()
-                target_context = ctx_model.infer_context(transitions_t)
+                target_context = ctx_model.infer_context(transitions_t)  # ty: ignore[call-non-callable]
                 context_expanded = target_context.expand(len(indices), -1)
                 loss, _ = ctx_model.compute_loss(
                     adapt_s,
@@ -609,7 +609,7 @@ class FewShotTransferExperiment:
             if isinstance(ctx_model.dictionary, torch.nn.Parameter):
                 ctx_model.dictionary.requires_grad_(True)
             with torch.no_grad():
-                target_context = ctx_model.infer_context(transitions_t)
+                target_context = ctx_model.infer_context(transitions_t)  # ty: ignore[call-non-callable]
 
         # Fill buffer with sampled target data
         for i in indices:

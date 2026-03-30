@@ -188,7 +188,7 @@ class DynaSAC:
         ):
             progress = min(global_step / self._soft_topk_anneal_steps, 1.0)
             temp = self._soft_topk_start * (1.0 - progress) + 0.01 * progress
-            self.encoder.soft_topk_temperature = temp
+            self.encoder.soft_topk_temperature = temp  # ty: ignore[invalid-assignment]
             metrics["diag/soft_topk_temp"] = temp
 
         # Update context window (context mode)
@@ -224,7 +224,7 @@ class DynaSAC:
             # Expand context to batch size if needed
             train_kwargs = dict(wm_kwargs)
             if "context" in train_kwargs:
-                train_kwargs["context"] = train_kwargs["context"].expand(
+                train_kwargs["context"] = train_kwargs["context"].expand(  # ty: ignore[unresolved-attribute]
                     self.config.batch_size, -1
                 )
 
@@ -284,7 +284,7 @@ class DynaSAC:
                 start_states,
                 bid_idx,
                 horizon,
-                context=wm_kwargs.get("context") if self._is_context_mode else None,
+                context=wm_kwargs.get("context") if self._is_context_mode else None,  # ty: ignore[invalid-argument-type]
             )
             self.buffer.add_model_batch(
                 rollout_data["states"],
@@ -370,7 +370,7 @@ class DynaSAC:
                 )
                 transitions = torch.cat([pad, transitions], dim=1)
             with torch.no_grad():
-                self._current_context = self.world_model.infer_context(transitions)  # type: ignore[union-attr]
+                self._current_context = self.world_model.infer_context(transitions)  # type: ignore[union-attr]  # ty: ignore[call-non-callable]
         return {"context": self._current_context}
 
     def on_episode_end(self) -> None:

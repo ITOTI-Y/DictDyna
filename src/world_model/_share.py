@@ -213,8 +213,8 @@ class BaseDictDynamics(nn.Module, ABC):
             delta_raw,
             state,
             self.controllable_dims,
-            self._scale,  # type: ignore[arg-type]
-            self._bias,  # type: ignore[arg-type]
+            self._scale,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+            self._bias,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             self._has_conversion,
         )
 

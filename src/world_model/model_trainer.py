@@ -55,12 +55,12 @@ class WorldModelTrainer:
 
         # Build parameter groups
         param_groups: list[dict] = [
-            {"params": list(model.encoder.parameters()), "lr": encoder_lr},
+            {"params": list(model.encoder.parameters()), "lr": encoder_lr},  # ty: ignore[unresolved-attribute]
         ]
         # Context encoder gets separate LR if present
         if hasattr(model, "context_encoder"):
             param_groups.append(
-                {"params": list(model.context_encoder.parameters()), "lr": context_lr},  # type: ignore[union-attr]
+                {"params": list(model.context_encoder.parameters()), "lr": context_lr},  # type: ignore[union-attr]  # ty: ignore[unresolved-attribute]
             )
 
         self._encoder_params = []
@@ -137,7 +137,7 @@ class WorldModelTrainer:
 
         for batch in dataloader:
             states, actions, next_states = batch
-            metrics = self.train_step(states, actions, next_states, **model_kwargs)
+            metrics = self.train_step(states, actions, next_states, **model_kwargs)  # ty: ignore[invalid-argument-type]
 
             for k, v in metrics.items():
                 total_metrics[k] = total_metrics.get(k, 0.0) + v
@@ -220,6 +220,6 @@ class WorldModelTrainer:
                 actions,
                 next_states,
                 sparsity_lambda=self.sparsity_lambda,
-                **model_kwargs,
+                **model_kwargs,  # ty: ignore[invalid-argument-type]
             )
         return metrics

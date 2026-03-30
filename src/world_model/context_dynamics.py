@@ -70,7 +70,7 @@ class ContextDynamicsModel(BaseDictDynamics):
         """
         return self.context_encoder(transitions)
 
-    def _encode(
+    def _encode(  # ty: ignore[invalid-method-override]
         self,
         state: torch.Tensor,
         action: torch.Tensor,
