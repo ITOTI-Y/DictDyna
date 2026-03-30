@@ -710,11 +710,41 @@ WM rollout 贡献 = A - B，Policy transfer 贡献 = B - C
 4. **WM 的价值在 source 训练阶段**：通过 Dyna rollout 帮助 SAC 在 source 建筑上学到更好的 policy，这个 policy 才是 transfer 的核心资产
 5. **Transfer reward 改善**：修复后 A 从 -8982/-9916/-9284 提升到 -7361/-7797/-7683
 
+#### K 组：Source 阶段 WM Rollout 消融（3-seed，2026-03-30）
+
+**动机**：J 组证明 transfer 阶段 rollout 贡献为零。追问：source 训练阶段的 rollout 是否帮助了 policy 训练？
+
+**实验设计**：
+- **B**：Source 有 rollout → Transfer 无 rollout（已有数据）
+- **D**：Source 无 rollout（`rollout_start_step=∞`）→ Transfer 无 rollout
+
+D vs B = source 阶段 WM rollout 的贡献
+
+**3-seed 结果**：
+
+| 数据量 | B (source+rollout) | D (source-no-rollout) | Source WM 贡献 |
+|--------|-------------------|-----------------------|---------------|
+| 1d | -9626±1172 | -9110±1167 | **-5.8±1.5%（微弱有害）** |
+| 3d | -8406±375 | -9170±1080 | +6.5±15.6%（不显著） |
+| 7d | -9190±989 | -10278±1671 | +9.4±9.0%（正向趋势，不显著） |
+
+**结论**：Source 阶段 WM rollout 贡献在统计上不显著。1d 微弱有害（3/3 seed 一致），3d/7d 有正向趋势但方差太大。
+
+#### 完整消融总结
+
+| 组件 | 贡献占比 | 证据强度 | 来源 |
+|------|---------|---------|------|
+| **SAC policy transfer** (actor/critic 权重) | **~100%** | 强（J 组所有 seed 一致） | B >> C |
+| Transfer 阶段 WM rollout | 0% | 强（J 组 A ≈ B） | A ≈ B |
+| Source 阶段 WM rollout | 不显著 (~0-9%) | 弱（K 组高方差） | B ≈ D |
+
 **对论文叙事的影响**：
-- ❌ 不能说「WM rollout 在 transfer 时提供数据增强」
-- ✅ 应强调「WM 通过 Dyna planning 在 source 阶段训练出高质量 policy，该 policy 可直接 transfer」
-- ✅ 「共享字典 + context encoder = 跨建筑 WM 知识载体，确保 source 训练的 policy 泛化到 target」
-- ✅ 「Transfer 阶段无需 rollout，简化部署——只需 policy forward pass + context inference」
+- ❌ 不能说「WM rollout 提供数据增强优势」（transfer/source 阶段均不显著）
+- ❌ 不能说「WM 通过 Dyna planning 在 source 阶段训练出高质量 policy」（K 组证伪）
+- ✅ 迁移优势的本质：**SAC 在 source 建筑真实数据上学到的 policy 可直接泛化到 target 建筑**
+- ✅ 世界模型（字典 + context encoder）的实际价值：**提供统一的跨建筑表征框架**，使得同一套 actor/critic 能处理不同建筑——即使 rollout 本身不帮忙
+- ⚠️ WM 在 Sinergym 5zone（17 维 obs、简单热动态）中贡献有限，但在更复杂环境（高维、非线性）中可能不同
+- ✅ 论文可以诚实报告：「DictDyna 框架的迁移优势主要源于跨建筑共享表征而非 model-based planning，这为 MBRL 在建筑能源管理中的实际价值提供了新的理解」
 
 ---
 

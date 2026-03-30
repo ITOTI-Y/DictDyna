@@ -193,6 +193,80 @@ class FewShotTransferExperiment:
 
         return dyna
 
+    def _train_source_no_rollout(self) -> DynaSAC:
+        """Train SAC on source buildings WITHOUT model rollouts (ablation D).
+
+        Same env interaction and SAC updates as _train_source, but
+        rollout_start_step is set to infinity so no model data is generated.
+        Policy learns purely from real environment transitions.
+        """
+        building_ids = [c["building_id"] for c in self.source_configs]
+
+        # Override rollout_start_step to disable rollouts entirely
+        no_rollout_config = self.config.model_copy(
+            update={
+                "dyna": self.config.dyna.model_copy(
+                    update={"rollout_start_step": 999_999_999}
+                )
+            }
+        )
+        dyna = DynaSAC(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            building_ids=building_ids,
+            dictionary=self.dictionary,
+            config=no_rollout_config,
+            action_scale=self.action_scale,
+            action_bias=self.action_bias,
+            obs_mean=self._obs_mean_t,
+            obs_std=self._obs_std_t,
+        )
+
+        global_step = 0
+        for cfg in self.source_configs:
+            bid = cfg["building_id"]
+            logger.info(f"Training on {bid} (no rollout)...")
+
+            with sinergym_workdir():
+                env = gymnasium.make(cfg["env_name"])
+            raw_obs, _ = env.reset(seed=self.seed)
+            obs = self._normalize(raw_obs)
+            done = False
+            ep_reward = 0.0
+
+            while not done:
+                global_step += 1
+                if global_step < 500:
+                    action = env.action_space.sample()
+                else:
+                    action = dyna.select_action(obs)
+
+                raw_next, reward, term, trunc, _ = env.step(action)
+                done = term or trunc
+                next_obs = self._normalize(raw_next)
+
+                if global_step >= 500:
+                    dyna.train_step(
+                        obs,
+                        action,
+                        float(reward),
+                        next_obs,
+                        done,
+                        bid,
+                        global_step,
+                    )
+                else:
+                    dyna.buffer.add_real(obs, action, float(reward), next_obs, done)
+
+                ep_reward += float(reward)
+                obs = next_obs
+
+            env.close()
+            logger.info(f"  {bid}: reward={ep_reward:.1f}, steps={global_step}")
+            dyna.on_episode_end()
+
+        return dyna
+
     def _collect_target_data(self) -> dict[str, np.ndarray]:
         """Collect full episode from target building."""
         env_name = self.target_config["env_name"]
@@ -231,10 +305,8 @@ class FewShotTransferExperiment:
         self, source_dyna: DynaSAC, target_data: dict, n_adapt_steps: int
     ) -> float:
         """Transfer: fine-tune adapter + SAC on limited target data."""
-        import copy
-
         # Deep copy so each data budget starts fresh from source
-        dyna = copy.deepcopy(source_dyna)
+        dyna = self._clone_dyna(source_dyna)
 
         # Reset optimizer states (prevent source Adam momentum from leaking)
         dyna.sac_trainer.actor_optimizer = torch.optim.Adam(
@@ -345,13 +417,30 @@ class FewShotTransferExperiment:
         eval_reward = self._evaluate_on_target(dyna, target_idx)
         return eval_reward
 
+    def _clone_dyna(self, source: DynaSAC) -> DynaSAC:
+        """Create a fresh DynaSAC and load source weights (avoids deepcopy issues)."""
+        clone = DynaSAC(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            building_ids=source.building_ids,
+            dictionary=self.dictionary,
+            config=source.config,
+            action_scale=self.action_scale,
+            action_bias=self.action_bias,
+            obs_mean=self._obs_mean_t,
+            obs_std=self._obs_std_t,
+        )
+        clone.world_model.load_state_dict(source.world_model.state_dict())
+        clone.actor.load_state_dict(source.actor.state_dict())
+        clone.critic.load_state_dict(source.critic.state_dict())
+        clone.critic_target.load_state_dict(source.critic_target.state_dict())
+        return clone
+
     def _run_context_transfer(
         self, source_dyna: DynaSAC, target_data: dict, n_adapt_steps: int
     ) -> float:
         """Context-conditioned transfer: inherit source WM, fine-tune on target."""
-        import copy
-
-        dyna = copy.deepcopy(source_dyna)
+        dyna = self._clone_dyna(source_dyna)
         # dyna.world_model is the SOURCE-TRAINED ContextDynamicsModel
         # (context_encoder + conditioned_encoder + dictionary all trained on source)
         ctx_model = dyna.world_model
@@ -471,9 +560,7 @@ class FewShotTransferExperiment:
         Same as _run_context_transfer but SAC trains on real data only.
         Isolates policy-transfer contribution from WM-rollout contribution.
         """
-        import copy
-
-        dyna = copy.deepcopy(source_dyna)
+        dyna = self._clone_dyna(source_dyna)
         ctx_model = dyna.world_model
 
         # Context inference + fine-tune (same as full transfer)
