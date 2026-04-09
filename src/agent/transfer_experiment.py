@@ -130,6 +130,85 @@ class FewShotTransferExperiment:
 
         return results
 
+    def run_ablation(
+        self,
+        conditions: list[str] | None = None,
+    ) -> dict:
+        """Run ablation transfer experiment with multiple conditions.
+
+        Args:
+            conditions: List of conditions to run. Defaults to all:
+                - "scratch": from-scratch baseline (no transfer)
+                - "zero_shot": context inference only, no fine-tuning
+                - "context": context inference + encoder fine-tuning (default)
+                - "adapter": legacy adapter-based transfer
+                Each condition is run for all adaptation_days budgets.
+
+        Returns:
+            Dict keyed by "{condition}_{days}d" with reward values.
+        """
+        all_conditions = ["scratch", "zero_shot", "context", "adapter"]
+        conditions = conditions or all_conditions
+        results: dict = {}
+
+        logger.info("=== Phase 1: Training on source buildings ===")
+        source_dyna = self._train_source()
+
+        # For adapter mode, also train a source with dict mode
+        source_dyna_adapter = None
+        if "adapter" in conditions:
+            logger.info("=== Training adapter-mode source (for adapter comparison) ===")
+            adapter_config = self.config.model_copy(update={"mode": "dict"})
+            orig_config = self.config
+            self.config = adapter_config
+            source_dyna_adapter = self._train_source()
+            self.config = orig_config
+
+        logger.info("=== Phase 2: Collecting target building data ===")
+        target_data = self._collect_target_data()
+
+        for days in self.adaptation_days:
+            steps = days * 96
+            logger.info(f"\n=== {days}-day adaptation ({steps} steps) ===")
+
+            for cond in conditions:
+                if cond == "scratch":
+                    reward = self._run_from_scratch(target_data, steps)
+                elif cond == "zero_shot":
+                    reward = self._run_context_transfer(
+                        source_dyna, target_data, steps, fine_tune=False
+                    )
+                elif cond == "context":
+                    reward = self._run_context_transfer(
+                        source_dyna, target_data, steps, fine_tune=True
+                    )
+                elif cond == "adapter":
+                    assert source_dyna_adapter is not None
+                    reward = self._run_transfer(source_dyna_adapter, target_data, steps)
+                else:
+                    raise ValueError(f"Unknown condition: {cond}")
+
+                results[f"{cond}_{days}d"] = reward
+                logger.info(f"  {cond} {days}d: {reward:.1f}")
+
+            # Log advantages vs scratch
+            scratch_key = f"scratch_{days}d"
+            if scratch_key in results:
+                scratch = results[scratch_key]
+                for cond in conditions:
+                    if cond == "scratch":
+                        continue
+                    key = f"{cond}_{days}d"
+                    if key in results:
+                        adv = (results[key] - scratch) / abs(scratch) * 100
+                        logger.info(f"  {cond} vs scratch: {adv:+.1f}%")
+
+        with open(self.save_dir / "ablation_results.json", "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"Ablation results saved to {self.save_dir}")
+
+        return results
+
     def _train_source(self) -> DynaSAC:
         """Train Dyna-SAC on source buildings (1 episode each)."""
 
@@ -437,9 +516,21 @@ class FewShotTransferExperiment:
         return clone
 
     def _run_context_transfer(
-        self, source_dyna: DynaSAC, target_data: dict, n_adapt_steps: int
+        self,
+        source_dyna: DynaSAC,
+        target_data: dict,
+        n_adapt_steps: int,
+        fine_tune: bool = True,
     ) -> float:
-        """Context-conditioned transfer: inherit source WM, fine-tune on target."""
+        """Context-conditioned transfer: inherit source WM, adapt on target.
+
+        Args:
+            source_dyna: Source-trained DynaSAC.
+            target_data: Target building data dict.
+            n_adapt_steps: Number of adaptation steps (data budget).
+            fine_tune: If True, fine-tune context + conditioned encoder on target.
+                If False, use pure zero-shot context inference only.
+        """
         dyna = self._clone_dyna(source_dyna)
         # dyna.world_model is the SOURCE-TRAINED ContextDynamicsModel
         # (context_encoder + conditioned_encoder + dictionary all trained on source)
@@ -468,7 +559,7 @@ class FewShotTransferExperiment:
 
         # Optional: fine-tune ONLY context encoder on target data
         # Dictionary and conditioned encoder are frozen to preserve source knowledge
-        if n_adapt_steps >= 50:
+        if fine_tune and n_adapt_steps >= 50:
             adapt_s = torch.tensor(target_data["states"][indices], device=self.device)
             adapt_a = torch.tensor(target_data["actions"][indices], device=self.device)
             adapt_sn = torch.tensor(

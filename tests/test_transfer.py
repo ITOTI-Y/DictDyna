@@ -289,6 +289,65 @@ class TestCloneDyna:
             assert not torch.allclose(p1, p2)
 
 
+class TestZeroShotTransfer:
+    """Test zero-shot (no fine-tune) context transfer path."""
+
+    def test_zero_shot_skips_finetune(self):
+        """With fine_tune=False, encoder weights should not change."""
+        dyna = _make_dyna("context")
+        data = _make_target_data(100)
+        n_adapt_steps = 96
+
+        # Record initial encoder weights
+        initial_weights = {
+            name: p.clone() for name, p in dyna.world_model.encoder.named_parameters()
+        }
+
+        # Simulate zero-shot path: infer context, NO fine-tuning
+        total = len(data["states"])
+        indices = np.linspace(0, total - 1, n_adapt_steps, dtype=int)
+        s_ctx = data["states"][indices]
+        a_ctx = data["actions"][indices]
+        sn_ctx = data["next_states"][indices]
+        delta_ctx = sn_ctx - s_ctx
+        transitions = np.concatenate([s_ctx, a_ctx, delta_ctx], axis=-1)
+        transitions_t = torch.tensor(transitions, dtype=torch.float32).unsqueeze(0)
+
+        with torch.no_grad():
+            ctx = dyna.world_model.infer_context(transitions_t)
+
+        assert ctx.shape == (1, CONTEXT_DIM)
+
+        # Encoder weights unchanged (zero-shot = no training)
+        for name, p in dyna.world_model.encoder.named_parameters():
+            torch.testing.assert_close(p, initial_weights[name])
+
+    def test_zero_shot_produces_valid_context(self):
+        """Zero-shot inferred context should be finite and usable in forward pass."""
+        dyna = _make_dyna("context")
+        data = _make_target_data(100)
+
+        s = data["states"][:20]
+        a = data["actions"][:20]
+        sn = data["next_states"][:20]
+        delta = sn - s
+        transitions = np.concatenate([s, a, delta], axis=-1)
+        transitions_t = torch.tensor(transitions, dtype=torch.float32).unsqueeze(0)
+
+        with torch.no_grad():
+            ctx = dyna.world_model.infer_context(transitions_t)
+
+        # Use context in forward pass
+        s_t = torch.tensor(data["states"][:4])
+        a_t = torch.tensor(data["actions"][:4])
+        ctx_expanded = ctx.expand(4, -1)
+        with torch.no_grad():
+            result = dyna.world_model(s_t, a_t, context=ctx_expanded)
+        pred = result[0] if isinstance(result, tuple) else result
+        assert pred.shape == s_t.shape
+        assert torch.isfinite(pred).all()
+
+
 class TestContextTransferWorkflow:
     """Integration test for the context transfer workflow."""
 
