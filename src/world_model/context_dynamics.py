@@ -81,6 +81,8 @@ class ContextDynamicsModel(BaseDictDynamics):
         x = torch.cat([state, action, context], dim=-1)
         h = self.encoder.shared_trunk(x)
         alpha = self.encoder.head(h)
+        # Context gating: modulate before sparsification
+        alpha = self.encoder.apply_gating(alpha, context)
         if self.encoder.sparsity_method == "topk":
             alpha = self.encoder._topk_sparsify(alpha)
         return alpha, h

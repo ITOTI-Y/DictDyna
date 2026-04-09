@@ -77,6 +77,11 @@ class ContextConditionedEncoder(nn.Module):
     Replaces SparseEncoder's per-building adapter routing with continuous
     context conditioning via concatenation: trunk input = (s, a, z).
 
+    Optionally applies context-to-sparse gating: context z generates
+    atom-level gates that modulate sparse codes before top-k selection.
+    This allows different buildings to activate different sparse subspaces
+    on the shared dictionary.
+
     Args:
         state_dim: State dimension d.
         action_dim: Action dimension m.
@@ -86,6 +91,7 @@ class ContextConditionedEncoder(nn.Module):
         activation: Activation function name.
         sparsity_method: "topk" or "l1_penalty".
         topk_k: If sparsity_method="topk", keep top-k activations.
+        use_context_gating: If True, apply context-conditioned atom gating.
     """
 
     def __init__(
@@ -100,12 +106,14 @@ class ContextConditionedEncoder(nn.Module):
         topk_k: int = 16,
         use_layernorm: bool = False,
         soft_topk_temperature: float = 0.0,
+        use_context_gating: bool = False,
     ) -> None:
         super().__init__()
         self.n_atoms = n_atoms
         self.sparsity_method = sparsity_method
         self.topk_k = topk_k
         self.soft_topk_temperature = soft_topk_temperature
+        self.use_context_gating = use_context_gating
 
         shared_hidden_dims = shared_hidden_dims or [256, 256]
         act_fn = {"relu": nn.ReLU, "gelu": nn.GELU, "tanh": nn.Tanh}[activation]
@@ -124,6 +132,29 @@ class ContextConditionedEncoder(nn.Module):
 
         # Output head: hidden → n_atoms
         self.head = nn.Linear(in_dim, n_atoms)
+
+        # Context-to-sparse gating: z → atom-level gate ∈ (0, 1)^K
+        # Gate modulates alpha BEFORE top-k, so context influences which
+        # atoms are selected. Small-init bias to start near-uniform.
+        if use_context_gating:
+            self.gate_net = nn.Linear(context_dim, n_atoms)
+            nn.init.normal_(self.gate_net.weight, std=0.01)
+            nn.init.zeros_(self.gate_net.bias)
+
+    def apply_gating(self, alpha: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """Apply context-conditioned gating to sparse codes.
+
+        Args:
+            alpha: Raw sparse codes, shape (batch, K).
+            context: Context vector, shape (batch, context_dim).
+
+        Returns:
+            Gated sparse codes, shape (batch, K).
+        """
+        if not self.use_context_gating:
+            return alpha
+        gate = torch.sigmoid(self.gate_net(context))  # (batch, K)
+        return alpha * gate
 
     def forward(
         self,
@@ -144,6 +175,9 @@ class ContextConditionedEncoder(nn.Module):
         x = torch.cat([state, action, context], dim=-1)
         h = self.shared_trunk(x)
         alpha = self.head(h)
+
+        # Context gating: modulate before sparsification
+        alpha = self.apply_gating(alpha, context)
 
         if self.sparsity_method == "topk":
             alpha = self._topk_sparsify(alpha)

@@ -70,6 +70,11 @@ class ContextEncoderSchema(BaseModel):
     )
     hidden_dims: list[int] = Field(default=[128, 128])
     context_lr: float = Field(1e-3, gt=0, description="Context encoder learning rate")
+    use_context_gating: bool = Field(
+        False,
+        description="Enable context-to-sparse gating: context z generates atom-level "
+        "gates that modulate sparse codes before top-k selection",
+    )
 
 
 class WorldModelLossSchema(BaseModel):

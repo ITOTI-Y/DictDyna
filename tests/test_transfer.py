@@ -422,3 +422,145 @@ class TestContextTransferWorkflow:
             batch["dones"],
         )
         assert isinstance(metrics, dict)
+
+
+class TestContextGating:
+    """Test context-to-sparse gating mechanism."""
+
+    def _make_gated_config(self) -> TrainSchema:
+        return TrainSchema(
+            mode="context",  # ty: ignore[invalid-argument-type]
+            batch_size=16,
+            buffer_size=200,
+            dictionary=DictionarySchema(
+                n_atoms=N_ATOMS,
+                state_dim=STATE_DIM,
+                sparsity_lambda=0.1,
+            ),
+            encoder=SparseEncoderSchema(
+                shared_hidden_dims=[64, 64],
+                adapter_dim=32,
+            ),
+            context=ContextEncoderSchema(
+                context_dim=CONTEXT_DIM,
+                context_window=5,
+                hidden_dims=[32, 32],
+                use_context_gating=True,
+            ),
+            dyna=DynaSchema(
+                rollout_start_step=0,
+                rollout_horizon=1,
+                rollouts_per_step=3,
+                model_to_real_ratio=0.2,
+            ),
+            sac=SACSchema(hidden_dims=[64, 64]),
+            device="cpu",
+        )
+
+    def test_gating_builds(self):
+        """DynaSAC with gating enabled builds without error."""
+        config = self._make_gated_config()
+        dyna = DynaSAC(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            building_ids=["b0"],
+            dictionary=_make_dictionary(),
+            config=config,
+        )
+        assert hasattr(dyna.world_model.encoder, "gate_net")
+        assert dyna.world_model.encoder.use_context_gating
+
+    def test_gating_forward(self):
+        """Forward pass with gating produces valid output."""
+        config = self._make_gated_config()
+        dyna = DynaSAC(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            building_ids=["b0"],
+            dictionary=_make_dictionary(),
+            config=config,
+        )
+        data = _make_target_data(20)
+        s = data["states"][:5]
+        a = data["actions"][:5]
+        sn = data["next_states"][:5]
+        delta = sn - s
+        transitions = np.concatenate([s, a, delta], axis=-1)
+        transitions_t = torch.tensor(transitions, dtype=torch.float32).unsqueeze(0)
+
+        with torch.no_grad():
+            ctx = dyna.world_model.infer_context(transitions_t)
+
+        s_t = torch.tensor(s)
+        a_t = torch.tensor(a)
+        ctx_expanded = ctx.expand(5, -1)
+
+        result = dyna.world_model(s_t, a_t, context=ctx_expanded)
+        pred = result[0] if isinstance(result, tuple) else result
+        assert pred.shape == s_t.shape
+        assert torch.isfinite(pred).all()
+
+    def test_different_contexts_produce_different_gates(self):
+        """Different context vectors should produce different gate patterns."""
+        from src.world_model.context_encoder import ContextConditionedEncoder
+
+        encoder = ContextConditionedEncoder(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            context_dim=CONTEXT_DIM,
+            n_atoms=N_ATOMS,
+            shared_hidden_dims=[64, 64],
+            use_context_gating=True,
+        )
+        alpha = torch.randn(2, N_ATOMS)
+        ctx1 = torch.randn(1, CONTEXT_DIM).expand(2, -1)
+        ctx2 = torch.randn(1, CONTEXT_DIM).expand(2, -1)
+
+        gated1 = encoder.apply_gating(alpha, ctx1)
+        gated2 = encoder.apply_gating(alpha, ctx2)
+
+        # Different contexts should produce different gated outputs
+        assert not torch.allclose(gated1, gated2)
+
+    def test_gating_disabled_is_identity(self):
+        """With use_context_gating=False, apply_gating is identity."""
+        from src.world_model.context_encoder import ContextConditionedEncoder
+
+        encoder = ContextConditionedEncoder(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            context_dim=CONTEXT_DIM,
+            n_atoms=N_ATOMS,
+            shared_hidden_dims=[64, 64],
+            use_context_gating=False,
+        )
+        alpha = torch.randn(4, N_ATOMS)
+        ctx = torch.randn(4, CONTEXT_DIM)
+
+        gated = encoder.apply_gating(alpha, ctx)
+        torch.testing.assert_close(gated, alpha)
+
+    def test_gating_loss_backward(self):
+        """Loss backward through gating should work without error."""
+        config = self._make_gated_config()
+        dyna = DynaSAC(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            building_ids=["b0"],
+            dictionary=_make_dictionary(),
+            config=config,
+        )
+        data = _make_target_data(20)
+        s = torch.tensor(data["states"][:8])
+        a = torch.tensor(data["actions"][:8])
+        sn = torch.tensor(data["next_states"][:8])
+        ctx = torch.randn(8, CONTEXT_DIM)
+
+        loss, _info = dyna.world_model.compute_loss(
+            s, a, sn, context=ctx, sparsity_lambda=0.1
+        )
+        assert torch.isfinite(loss)
+        loss.backward()
+
+        # Gate net should have gradients
+        assert dyna.world_model.encoder.gate_net.weight.grad is not None

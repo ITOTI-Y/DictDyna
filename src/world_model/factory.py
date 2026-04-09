@@ -97,6 +97,7 @@ def build_world_model(
             sparsity_method=config.encoder.sparsity_method,
             topk_k=config.encoder.topk_k,
             use_layernorm=config.encoder.use_layernorm,
+            use_context_gating=ctx_cfg.use_context_gating,
         )
         return ContextDynamicsModel(
             dictionary=dictionary.to(device),
