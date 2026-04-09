@@ -462,7 +462,9 @@ class FewShotTransferExperiment:
 
         # Infer context (zero-shot, mean-pooled over all transitions)
         with torch.no_grad():
-            target_context = ctx_model.infer_context(transitions_t)  # (1, context_dim)  # ty: ignore[call-non-callable]
+            target_context = ctx_model.infer_context(
+                transitions_t
+            )  # (1, context_dim)  # ty: ignore[call-non-callable]
 
         # Optional: fine-tune ONLY context encoder on target data
         # Dictionary and conditioned encoder are frozen to preserve source knowledge

@@ -24,10 +24,10 @@
 
 本文有四项贡献：
 
-1. **方法创新**：首个将 dictionary learning 引入 MBRL world model 的工作，提出 shared dictionary dynamics model，将多建筑 transition dynamics 分解为共享 basis atoms 与建筑特定的 sparse codes。
-2. **迁移学习**：提出 few-shot adaptation 机制——新建筑仅需学习轻量 adapter 参数即可复用共享字典，用 1–7 天数据即可达到有效控制。
+1. **方法创新**：首个将 dictionary learning 引入 MBRL world model 的工作，提出 shared dictionary + context-conditioned sparse dynamics model，将多建筑 transition dynamics 分解为共享 basis atoms 与 context-conditioned sparse codes。
+2. **迁移学习**：提出 few-shot context adaptation 机制——新建筑通过少量 transitions 推断 context vector，冻结共享字典，可选微调轻量 encoder，用 1–7 天数据即可达到有效控制。
 3. **可解释性**：dictionary atoms 提供对建筑热动态模式的物理可解释聚类（如太阳得热响应、夜间散热衰减等）。
-4. **多平台实验验证**：在 Sinergym（EnergyPlus 高保真热动态控制）和 CityLearn v2（社区级储能管理）两个互补平台上全面验证 sample efficiency、transfer 性能和 scalability，对比 model-free 和现有 MBRL baselines。
+4. **实验验证**：在 Sinergym（EnergyPlus 高保真 HVAC 控制）上全面验证 sample efficiency、few-shot transfer 性能，多 seed 验证结果稳定性，对比 model-free 和现有 MBRL baselines。
 
 ---
 
@@ -244,11 +244,11 @@ $$\min_{\mathbf{D}, \{\boldsymbol{\alpha}_j\}} \sum_{j=1}^{N_{\text{data}}} \lef
 
 **核心论点：**
 
-**§4.4.1 Sparse Encoder Network（~300 词）：**
-- Sparse encoder $g_\theta(\cdot; \phi_i)$ 是一个轻量 MLP，将 $(s_t, a_t)$ 映射到 sparse activation $\boldsymbol{\alpha} \in \mathbb{R}^K$。
-- 架构：shared layers（参数 $\theta$）+ building-specific adapter layer（参数 $\phi_i$）。
-- 稀疏性强制方式：$\ell_1$ penalty、proximal gradient step 或 top-$k$ hard thresholding。
-- Adapter $\phi_i$ 很小（例如单线性层或 low-rank adaptation），每栋建筑的额外参数量极少。
+**§4.4.1 Context-Conditioned Sparse Encoder（~300 词）：**
+- Context encoder 从近期 K 条 transitions 推断连续建筑 context $z_i$。
+- Conditioned sparse encoder $g_\theta(s_t, a_t, z_i)$ 将 $(s_t, a_t, z_i)$ 映射到 sparse activation $\boldsymbol{\alpha} \in \mathbb{R}^K$。
+- 稀疏性强制方式：top-$k$ hard thresholding（k=16, 87.5% 稀疏性）。
+- Context vector $z_i$ 替代离散 per-building adapter，实现连续建筑表征与 zero-shot 迁移能力。
 
 **§4.4.2 World Model Training（~250 词）：**
 - World model 损失函数：
@@ -277,13 +277,12 @@ $$\mathcal{L}_{\text{WM}} = \mathbb{E}\left[\left\|s_{t+1}^{(i)} - \hat{s}_{t+1}
 
 **核心论点：**
 - 对于训练时未见过的新建筑 $j$：
-  1. 固定 shared dictionary $\mathbf{D}$ 和 shared encoder 参数 $\theta$。
-  2. 初始化新 adapter $\phi_j$（随机或从最相似的已有建筑复制）。
-  3. 收集少量交互数据（1–7 天）。
-  4. 仅微调 $\phi_j$。
-  5. 用 adapted world model 进行 Dyna planning。
-- 理论解释：shared dictionary 张成了通用热动态空间；adaptation 只需学习新建筑在此空间中的"坐标"。
-- 参数效率：新增一栋建筑仅需 $|\phi_j|$ 个新参数，远少于从头训练的 $|\theta| + |\phi|$。
+  1. 固定 shared dictionary $\mathbf{D}$。
+  2. 从少量 target transitions 推断 context $z_j$（zero-shot inference）。
+  3. 可选：收集更多交互数据（1–7 天），微调 context encoder 和 conditioned encoder。
+  4. 用 adapted world model 进行 Dyna planning。
+- 理论解释：shared dictionary 张成了通用热动态空间；context vector 编码新建筑在此空间中的"热指纹"。
+- 参数效率：无需新增建筑特定参数，context 从数据中推断。微调时仅更新 encoder，字典保持冻结。
 - **迁移场景**：
   - 同建筑类型跨气候区（同一 IDF，不同天气文件）
   - 跨建筑类型（不同 IDF 文件）

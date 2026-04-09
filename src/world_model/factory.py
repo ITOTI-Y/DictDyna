@@ -54,7 +54,16 @@ def build_world_model(
         config.dictionary.reward_dim_weight,
         device,
     )
-    ctrl_dims = OBS_CONFIG.CONTROLLABLE if config.dictionary.controllable_only else None
+    ctrl_dims = None
+    if config.dictionary.controllable_only:
+        import warnings
+
+        warnings.warn(
+            "controllable_only=True is experimental and has known shape mismatch bugs. "
+            "Results may be incorrect. Use at your own risk.",
+            stacklevel=2,
+        )
+        ctrl_dims = OBS_CONFIG.CONTROLLABLE
 
     # Space conversion for controllable-only mode
     wm_diff_mean = None

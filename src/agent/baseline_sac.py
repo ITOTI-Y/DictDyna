@@ -240,6 +240,40 @@ class SACBaselineTrainer:
             }
         return {"mean_reward": 0.0, "std_reward": 0.0}
 
+    def evaluate_independent(self, n_episodes: int = 1) -> dict:
+        """Run independent evaluation with frozen deterministic policy.
+
+        Uses the same env (reset between episodes) to avoid EnergyPlus
+        multi-instance SIGSEGV. Actions are deterministic (policy mean).
+        """
+        rewards: list[float] = []
+        for ep in range(n_episodes):
+            raw_obs, _ = self.env.reset(seed=self.seed + 1000 + ep)
+            obs = self.obs_normalizer.normalize(raw_obs)
+            episode_reward = 0.0
+            done = False
+            while not done:
+                state_t = torch.tensor(
+                    obs, dtype=torch.float32, device=self.device
+                ).unsqueeze(0)
+                with torch.no_grad():
+                    action = self.actor.get_action(state_t)
+                action = action.cpu().numpy().squeeze(0)
+                raw_next_obs, reward, terminated, truncated, _ = self.env.step(action)
+                done = terminated or truncated
+                episode_reward += float(reward)
+                obs = self.obs_normalizer.normalize(raw_next_obs)
+            rewards.append(episode_reward)
+            logger.info(
+                f"Independent eval ep {ep + 1}/{n_episodes}: {episode_reward:.1f}"
+            )
+        arr = np.array(rewards)
+        return {
+            "mean_reward": float(arr.mean()),
+            "std_reward": float(arr.std()),
+            "episode_rewards": rewards,
+        }
+
     def _save_results(
         self, episode_rewards: list[float], eval_history: list[dict]
     ) -> None:

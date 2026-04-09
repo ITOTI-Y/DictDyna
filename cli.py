@@ -199,8 +199,11 @@ def multi_train(
         bool, typer.Option("--independent/--shared", help="Independent vs shared dict")
     ] = False,
     context: Annotated[
-        bool, typer.Option("--context", help="Use context-conditioned world model")
-    ] = False,
+        bool,
+        typer.Option(
+            "--context/--no-context", help="Use context-conditioned world model"
+        ),
+    ] = True,
 ) -> None:
     """Phase III: Multi-building Dyna-SAC with shared dictionary."""
     cfg = _load_config(config, override)
@@ -252,8 +255,12 @@ def transfer(
         str, typer.Option("--dict", help="Pretrained dictionary path")
     ] = "output/pretrained/dict_k128.pt",
     context: Annotated[
-        bool, typer.Option("--context", help="Use context-conditioned transfer")
-    ] = False,
+        bool,
+        typer.Option(
+            "--context/--no-context",
+            help="Use context-conditioned transfer (default; use --no-context for legacy adapter mode)",
+        ),
+    ] = True,
     tag: Annotated[str, typer.Option(help="Experiment tag for save_dir naming")] = "",
 ) -> None:
     """Phase IV: Few-shot transfer to new building (1/3/7 days)."""

@@ -20,7 +20,8 @@ def normalize_obs(
 ) -> np.ndarray:
     """Normalize observation: clip((s - mean) / std, clip_lo, clip_hi)."""
     lo, hi = OBS_CLIP_RANGE
-    return np.clip((raw_obs - mean) / std, lo, hi).astype(np.float32)
+    safe_std = np.maximum(std, STABILITY_EPS)
+    return np.clip((raw_obs - mean) / safe_std, lo, hi).astype(np.float32)
 
 
 def compute_td_error_weights(

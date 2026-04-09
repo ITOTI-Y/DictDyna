@@ -6,17 +6,21 @@
 
 ## 项目概述
 
-DictDyna 是一个基于字典学习（Dictionary Learning）的模型基强化学习（MBRL）系统，用于建筑 HVAC 能源管理。核心思想：用 overcomplete dictionary 捕获多建筑共享的热动态模式，通过 per-building sparse encoder 编码个体差异，结合 Dyna-style planning 提升 sample efficiency。
+DictDyna 是一个基于字典学习（Dictionary Learning）的模型基强化学习（MBRL）系统，用于建筑 HVAC 能源管理。核心思想：用 overcomplete dictionary 捕获多建筑共享的热动态模式，通过 context-conditioned sparse encoder 编码建筑个体差异，结合 Dyna-style planning 提升 sample efficiency 和跨建筑迁移性。
 
 ### 核心方程
 
 ```
-ŝ'_{t+1} = s_t + D · g_θ(s_t, a_t; ϕ_i)
+ŝ'_{t+1} = s_t + D · g_θ(s_t, a_t, z_i)
+z_i = ContextEncoder(recent K transitions from building i)
 ```
 
 - `D ∈ R^{d×K}`：共享字典（K=128 个原子）
-- `g_θ(·; ϕ_i)`：稀疏编码器（共享 trunk θ + per-building adapter ϕ_i）
+- `g_θ(·, z_i)`：context-conditioned 稀疏编码器，z_i 为从近期 transitions 推断的连续建筑 context
 - topk(k=16) 强制 87.5% 稀疏性
+- Few-shot transfer：冻结 D，在少量 target 数据上推断 context 并可选微调 encoder
+
+> **注**：早期版本使用 per-building adapter ϕ_i（离散路由），Phase 5 迭代 6 起已迁移至 context-conditioned 架构。历史迭代记录保留 adapter 相关描述。
 
 ### 目标期刊
 

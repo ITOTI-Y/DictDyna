@@ -29,7 +29,8 @@ class DictionarySchema(BaseModel):
     )
     controllable_only: bool = Field(
         False,
-        description="WM predicts only controllable dims (4) instead of all (17)",
+        description="[EXPERIMENTAL - known shape mismatch bug, do not use] "
+        "WM predicts only controllable dims (4) instead of all (17)",
     )
 
 
