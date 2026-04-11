@@ -134,6 +134,8 @@ class FewShotTransferExperiment:
     def run_ablation(
         self,
         conditions: list[str] | None = None,
+        target_data: dict | None = None,
+        source_dyna: DynaSAC | None = None,
     ) -> dict:
         """Run ablation transfer experiment with multiple conditions.
 
@@ -151,6 +153,11 @@ class FewShotTransferExperiment:
                   fine-tuning + actor/critic adaptation)
                 - "adapter": legacy adapter-based transfer
                 Each condition (except pure_zero_shot) is run per budget.
+            target_data: Optional pre-collected target data. If provided,
+                skip Phase 2 collection (used by unified experiments that
+                share target data across ungated/gated source configs).
+            source_dyna: Optional pre-trained source DynaSAC. If provided,
+                skip Phase 1 source training.
 
         Returns:
             Dict keyed by "{condition}_{days}d" with reward values.
@@ -165,8 +172,11 @@ class FewShotTransferExperiment:
         conditions = conditions or all_conditions
         results: dict = {}
 
-        logger.info("=== Phase 1: Training on source buildings ===")
-        source_dyna = self._train_source()
+        if source_dyna is None:
+            logger.info("=== Phase 1: Training on source buildings ===")
+            source_dyna = self._train_source()
+        else:
+            logger.info("=== Phase 1: Using pre-trained source ===")
 
         # For adapter mode, also train a source with dict mode
         source_dyna_adapter = None
@@ -178,8 +188,11 @@ class FewShotTransferExperiment:
             source_dyna_adapter = self._train_source()
             self.config = orig_config
 
-        logger.info("=== Phase 2: Collecting target building data ===")
-        target_data = self._collect_target_data()
+        if target_data is None:
+            logger.info("=== Phase 2: Collecting target building data ===")
+            target_data = self._collect_target_data()
+        else:
+            logger.info("=== Phase 2: Using pre-collected target data ===")
 
         # pure_zero_shot is budget-independent — compute once and reuse
         pure_zero_shot_reward: float | None = None
