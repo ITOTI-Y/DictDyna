@@ -289,10 +289,14 @@ class TestCloneDyna:
             assert not torch.allclose(p1, p2)
 
 
-class TestZeroShotTransfer:
-    """Test zero-shot (no fine-tune) context transfer path."""
+class TestNoEncoderFtTransfer:
+    """Test no_encoder_ft (skip encoder ft) context transfer path.
 
-    def test_zero_shot_skips_finetune(self):
+    NOTE: This is NOT pure zero-shot — actor/critic still adapt to target.
+    For true zero-shot evaluation, see TestPureZeroShot (TBD).
+    """
+
+    def test_no_encoder_ft_skips_finetune(self):
         """With fine_tune=False, encoder weights should not change."""
         dyna = _make_dyna("context")
         data = _make_target_data(100)
@@ -322,8 +326,8 @@ class TestZeroShotTransfer:
         for name, p in dyna.world_model.encoder.named_parameters():
             torch.testing.assert_close(p, initial_weights[name])
 
-    def test_zero_shot_produces_valid_context(self):
-        """Zero-shot inferred context should be finite and usable in forward pass."""
+    def test_no_encoder_ft_produces_valid_context(self):
+        """Inferred context should be finite and usable in forward pass."""
         dyna = _make_dyna("context")
         data = _make_target_data(100)
 
@@ -564,3 +568,109 @@ class TestContextGating:
 
         # Gate net should have gradients
         assert dyna.world_model.encoder.gate_net.weight.grad is not None
+
+
+class TestReviewRegressions:
+    """Regression tests for issues found in 2026-04-11 review.
+
+    F2: scratch baseline must use consistent normalization (target stats
+        for both training data and reward estimator).
+    F3: gating must use neutral initialization (initial gate ≈ 1, so the
+        gated baseline starts close to ungated).
+    """
+
+    def test_gating_neutral_initialization(self):
+        """F3: Initial gate values should be near 1.0, not 0.5.
+
+        Without neutral init, ungated and gated models start from very
+        different points (gated alpha is halved), making structural
+        comparisons unreliable.
+        """
+        from src.world_model.context_encoder import ContextConditionedEncoder
+
+        encoder = ContextConditionedEncoder(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            context_dim=CONTEXT_DIM,
+            n_atoms=N_ATOMS,
+            shared_hidden_dims=[64, 64],
+            use_context_gating=True,
+        )
+        # With small weight init and bias=5, sigmoid(W*z + 5) ≈ sigmoid(5) ≈ 0.993
+        ctx = torch.randn(8, CONTEXT_DIM)
+        gate_logits = encoder.gate_net(ctx)
+        gates = torch.sigmoid(gate_logits)
+
+        # Gates should be near 1.0 (allow for small weight perturbation)
+        assert gates.mean().item() > 0.95, (
+            f"Initial gate mean {gates.mean().item():.3f} should be near 1.0 "
+            f"to ensure neutral initialization (gated ≈ ungated at start)"
+        )
+        assert gates.min().item() > 0.85
+
+    def test_gating_with_neutral_init_preserves_alpha(self):
+        """F3: With neutral init, apply_gating should ≈ identity at start."""
+        from src.world_model.context_encoder import ContextConditionedEncoder
+
+        torch.manual_seed(0)
+        encoder = ContextConditionedEncoder(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM,
+            context_dim=CONTEXT_DIM,
+            n_atoms=N_ATOMS,
+            shared_hidden_dims=[64, 64],
+            use_context_gating=True,
+        )
+        alpha = torch.randn(4, N_ATOMS)
+        ctx = torch.randn(4, CONTEXT_DIM)
+
+        gated = encoder.apply_gating(alpha, ctx)
+
+        # Gated should be close to alpha (within ~7% relative error)
+        rel_diff = (gated - alpha).abs() / (alpha.abs() + 1e-8)
+        assert rel_diff.mean().item() < 0.1, (
+            f"Mean relative diff {rel_diff.mean().item():.3f} should be small "
+            f"with neutral gating init"
+        )
+
+    def test_no_encoder_ft_is_not_pure_zero_shot(self):
+        """F1: no_encoder_ft skips encoder ft but still trains actor/critic.
+
+        This documents that the current 'fine_tune=False' path is NOT pure
+        zero-shot. The pure_zero_shot path (added in F1.b) skips ALL target
+        adaptation.
+        """
+        import inspect
+
+        from src.agent.transfer_experiment import FewShotTransferExperiment
+
+        # _run_context_transfer ALWAYS runs SAC updates regardless of fine_tune
+        ctx_src = inspect.getsource(FewShotTransferExperiment._run_context_transfer)
+        assert "n_sac_updates" in ctx_src
+        assert "if fine_tune" in ctx_src
+
+        # _run_pure_zero_shot must NOT run SAC updates
+        pzs_src = inspect.getsource(FewShotTransferExperiment._run_pure_zero_shot)
+        assert "sac_trainer.update" not in pzs_src
+        assert "n_sac_updates" not in pzs_src
+        # And must verify actor weights remain unchanged
+        assert "must not modify actor weights" in pzs_src
+
+    def test_normalize_function_is_consistent_for_target_normalizer(self):
+        """F2: Verify that re-normalizing raw with target stats matches the
+        normalize_obs utility (so scratch's manual normalization is correct).
+        """
+        from src.agent._share import normalize_obs
+
+        rng = np.random.default_rng(42)
+        raw = rng.standard_normal((100, STATE_DIM)).astype(np.float32)
+        target_mean = raw.mean(axis=0).astype(np.float32)
+        target_std = np.maximum(raw.std(axis=0), 1e-8).astype(np.float32)
+
+        # Manual normalization (what scratch does after fix)
+        manual = ((raw - target_mean) / target_std).astype(np.float32)
+        # Library normalization
+        lib = np.stack([normalize_obs(r, target_mean, target_std) for r in raw])
+
+        # They should match (modulo clipping at +/- 10, but data is in [-3, 3] range)
+        np.testing.assert_allclose(manual, lib, atol=1e-6)

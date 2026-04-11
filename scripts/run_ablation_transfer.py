@@ -1,11 +1,20 @@
-"""Transfer ablation experiment: scratch vs zero-shot vs context vs adapter.
+"""Transfer ablation experiment: scratch vs pure_zero_shot vs no_encoder_ft vs context.
 
 Runs all conditions across 3 seeds x 3 budgets (1d/3d/7d).
 Results are saved per-seed and aggregated into a summary table.
 
+Conditions:
+    - scratch: from-scratch baseline (no transfer)
+    - pure_zero_shot: source actor evaluated on target with NO adaptation
+      (no encoder ft, no SAC updates, no rollouts). Identical across budgets.
+    - no_encoder_ft: skip encoder fine-tune, but still adapt actor/critic
+      and run model rollouts on target data
+    - context: full context transfer (inference + encoder ft + actor/critic)
+    - adapter: legacy adapter-based transfer
+
 Usage:
     uv run python scripts/run_ablation_transfer.py
-    uv run python scripts/run_ablation_transfer.py --conditions scratch zero_shot context
+    uv run python scripts/run_ablation_transfer.py --conditions scratch pure_zero_shot context
     uv run python scripts/run_ablation_transfer.py --seeds 42
 """
 
@@ -27,7 +36,13 @@ SOURCE = [
 TARGET = {"env_name": "Eplus-5zone-cool-continuous-v1", "building_id": "office_cool"}
 DAYS = [1, 3, 7]
 DEFAULT_SEEDS = [42, 123, 7]
-ALL_CONDITIONS = ["scratch", "zero_shot", "context", "adapter"]
+ALL_CONDITIONS = [
+    "scratch",
+    "pure_zero_shot",
+    "no_encoder_ft",
+    "context",
+    "adapter",
+]
 
 
 def main():

@@ -135,11 +135,16 @@ class ContextConditionedEncoder(nn.Module):
 
         # Context-to-sparse gating: z → atom-level gate ∈ (0, 1)^K
         # Gate modulates alpha BEFORE top-k, so context influences which
-        # atoms are selected. Small-init bias to start near-uniform.
+        # atoms are selected.
+        #
+        # Neutral initialization (Fix F3): bias initialized to large positive
+        # value so sigmoid(bias) ≈ 1. This means the initial gated model is
+        # close to the ungated baseline, isolating gating's structural effect
+        # from amplitude-scaling artifacts. With bias=5, sigmoid(5)≈0.9933.
         if use_context_gating:
             self.gate_net = nn.Linear(context_dim, n_atoms)
             nn.init.normal_(self.gate_net.weight, std=0.01)
-            nn.init.zeros_(self.gate_net.bias)
+            nn.init.constant_(self.gate_net.bias, 5.0)
 
     def apply_gating(self, alpha: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         """Apply context-conditioned gating to sparse codes.

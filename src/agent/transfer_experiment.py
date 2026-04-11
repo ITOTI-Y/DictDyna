@@ -8,6 +8,7 @@ with limited data (1/3/7 days). Compare:
 
 import contextlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import gymnasium
@@ -139,15 +140,28 @@ class FewShotTransferExperiment:
         Args:
             conditions: List of conditions to run. Defaults to all:
                 - "scratch": from-scratch baseline (no transfer)
-                - "zero_shot": context inference only, no fine-tuning
-                - "context": context inference + encoder fine-tuning (default)
+                - "pure_zero_shot": source actor evaluated directly on target
+                  with NO adaptation (no encoder ft, no SAC updates, no
+                  rollouts). Tests whether source-trained representations
+                  alone transfer. Reward is identical across budgets.
+                - "no_encoder_ft": context inference + actor/critic adaptation
+                  on target data, but no encoder/dictionary fine-tuning.
+                  (NOT pure zero-shot — target data still drives SAC.)
+                - "context": full pipeline (context inference + encoder
+                  fine-tuning + actor/critic adaptation)
                 - "adapter": legacy adapter-based transfer
-                Each condition is run for all adaptation_days budgets.
+                Each condition (except pure_zero_shot) is run per budget.
 
         Returns:
             Dict keyed by "{condition}_{days}d" with reward values.
         """
-        all_conditions = ["scratch", "zero_shot", "context", "adapter"]
+        all_conditions = [
+            "scratch",
+            "pure_zero_shot",
+            "no_encoder_ft",
+            "context",
+            "adapter",
+        ]
         conditions = conditions or all_conditions
         results: dict = {}
 
@@ -167,6 +181,13 @@ class FewShotTransferExperiment:
         logger.info("=== Phase 2: Collecting target building data ===")
         target_data = self._collect_target_data()
 
+        # pure_zero_shot is budget-independent — compute once and reuse
+        pure_zero_shot_reward: float | None = None
+        if "pure_zero_shot" in conditions:
+            logger.info("=== Pure zero-shot evaluation (no target adaptation) ===")
+            pure_zero_shot_reward = self._run_pure_zero_shot(source_dyna)
+            logger.info(f"  pure_zero_shot: {pure_zero_shot_reward:.1f}")
+
         for days in self.adaptation_days:
             steps = days * 96
             logger.info(f"\n=== {days}-day adaptation ({steps} steps) ===")
@@ -174,7 +195,10 @@ class FewShotTransferExperiment:
             for cond in conditions:
                 if cond == "scratch":
                     reward = self._run_from_scratch(target_data, steps)
-                elif cond == "zero_shot":
+                elif cond == "pure_zero_shot":
+                    assert pure_zero_shot_reward is not None
+                    reward = pure_zero_shot_reward
+                elif cond == "no_encoder_ft":
                     reward = self._run_context_transfer(
                         source_dyna, target_data, steps, fine_tune=False
                     )
@@ -528,8 +552,12 @@ class FewShotTransferExperiment:
             source_dyna: Source-trained DynaSAC.
             target_data: Target building data dict.
             n_adapt_steps: Number of adaptation steps (data budget).
-            fine_tune: If True, fine-tune context + conditioned encoder on target.
-                If False, use pure zero-shot context inference only.
+            fine_tune: If True, fine-tune context + conditioned encoder on
+                target. If False, skip encoder fine-tuning but still run
+                actor/critic updates and model rollouts on target data.
+                NOTE: fine_tune=False is NOT pure zero-shot — actor/critic
+                still adapt to target. For true zero-shot inference, see
+                _run_pure_zero_shot.
         """
         dyna = self._clone_dyna(source_dyna)
         # dyna.world_model is the SOURCE-TRAINED ContextDynamicsModel
@@ -730,16 +758,58 @@ class FewShotTransferExperiment:
         eval_reward = self._evaluate_on_target(dyna, "0")
         return eval_reward
 
+    def _run_pure_zero_shot(self, source_dyna: DynaSAC) -> float:
+        """Pure zero-shot: evaluate source-trained actor on target, no adaptation.
+
+        This is the strongest test of transferable representations:
+        - No encoder fine-tuning
+        - No SAC updates on target
+        - No model rollouts on target
+        - Source actor + source obs normalization, applied directly to target
+
+        Returns:
+            Episode reward on target environment using frozen source policy.
+        """
+        # Snapshot source actor state to verify no training occurred
+        initial_actor_state = {
+            k: v.clone() for k, v in source_dyna.actor.state_dict().items()
+        }
+        # Use _evaluate_on_target with default (source) normalization,
+        # which matches what the source actor was trained on.
+        reward = self._evaluate_on_target(source_dyna, "0")
+
+        # Sanity check: actor weights must be unchanged
+        for k, v in source_dyna.actor.state_dict().items():
+            assert torch.equal(v, initial_actor_state[k]), (
+                f"pure_zero_shot must not modify actor weights ({k} changed)"
+            )
+        return reward
+
     def _run_from_scratch(self, target_data: dict, n_steps: int) -> float:
-        """Train from scratch with only n_steps of target data."""
-        # Compute obs stats from target data itself (no source leakage)
-        target_obs_mean = torch.tensor(
-            target_data["raw_states"].mean(axis=0), dtype=torch.float32
-        )
-        target_obs_std = torch.tensor(
-            np.maximum(target_data["raw_states"].std(axis=0), 1e-8),
-            dtype=torch.float32,
-        )
+        """Train from scratch with only n_steps of target data.
+
+        FIX (F2): Uses target's own raw_states + target obs_mean/std for ALL
+        normalization (training data, reward estimator, eval). Previously
+        the scratch model trained on source-normalized states but used
+        target stats for the reward estimator, causing a coordinate-system
+        mismatch that polluted vs-scratch comparisons.
+        """
+        # Compute target's own obs stats from raw_states
+        target_obs_mean_np = target_data["raw_states"].mean(axis=0).astype(np.float32)
+        target_obs_std_np = np.maximum(
+            target_data["raw_states"].std(axis=0), 1e-8
+        ).astype(np.float32)
+        target_obs_mean = torch.tensor(target_obs_mean_np, dtype=torch.float32)
+        target_obs_std = torch.tensor(target_obs_std_np, dtype=torch.float32)
+
+        # Re-normalize raw_states and raw_next_states with TARGET stats
+        # so the training data and reward estimator share the same coordinate system.
+        target_norm_states = (
+            (target_data["raw_states"] - target_obs_mean_np) / target_obs_std_np
+        ).astype(np.float32)
+        target_norm_next_states = (
+            (target_data["raw_next_states"] - target_obs_mean_np) / target_obs_std_np
+        ).astype(np.float32)
 
         # Fresh Dyna-SAC with random dictionary (true scratch, dict mode)
         random_dict = torch.randn_like(self.dictionary)
@@ -759,12 +829,12 @@ class FewShotTransferExperiment:
             obs_std=target_obs_std,
         )
 
-        # Train world model on uniformly sampled data (same as transfer)
-        total = len(target_data["states"])
+        # Train world model on TARGET-normalized data
+        total = len(target_norm_states)
         indices = np.linspace(0, total - 1, n_steps, dtype=int)
-        s = torch.tensor(target_data["states"][indices], device=self.device)
+        s = torch.tensor(target_norm_states[indices], device=self.device)
         a = torch.tensor(target_data["actions"][indices], device=self.device)
-        sn = torch.tensor(target_data["next_states"][indices], device=self.device)
+        sn = torch.tensor(target_norm_next_states[indices], device=self.device)
 
         for _epoch in range(50):
             dyna.world_model.train()
@@ -780,22 +850,20 @@ class FewShotTransferExperiment:
             dyna.wm_trainer.optimizer.step()
             dyna.world_model.normalize_atoms()
 
-        # Fill buffer with same sampled data
+        # Fill buffer with TARGET-normalized data
         for i in indices:
             dyna.buffer.add_real(
-                target_data["states"][i],
+                target_norm_states[i],
                 target_data["actions"][i],
                 target_data["rewards"][i],
-                target_data["next_states"][i],
+                target_norm_next_states[i],
                 False,
             )
 
         # SAC updates with rollouts (SAME as transfer for fairness)
-        # Fixed 200 updates: more data improves batch diversity, not update count
         batch_size = min(64, n_steps)
         n_sac_updates = 200
         for step in range(n_sac_updates):
-            # Generate rollouts (same as transfer)
             if n_steps >= batch_size and step >= 50:
                 start = dyna.buffer.real_buffer.sample(5, self.device)
                 rollout = dyna.rollout_gen.generate(
@@ -809,7 +877,6 @@ class FewShotTransferExperiment:
                     rollout["dones"],
                 )
 
-            # SAC update (mixed buffer, same as transfer)
             ratio = self.config.dyna.model_to_real_ratio if step >= 50 else 0.0
             batch = dyna.buffer.sample(
                 batch_size, model_ratio=ratio, device=self.device
@@ -822,16 +889,34 @@ class FewShotTransferExperiment:
                 batch["dones"],
             )
 
-        eval_reward = self._evaluate_on_target(dyna, "0")
+        # Eval with TARGET normalization (matches what scratch was trained on)
+        def target_normalizer(raw: np.ndarray) -> np.ndarray:
+            return ((raw - target_obs_mean_np) / target_obs_std_np).astype(np.float32)
+
+        eval_reward = self._evaluate_on_target(dyna, "0", normalizer=target_normalizer)
         return eval_reward
 
-    def _evaluate_on_target(self, dyna: DynaSAC, building_id: str) -> float:
-        """Evaluate policy on target building (full episode)."""
+    def _evaluate_on_target(
+        self,
+        dyna: DynaSAC,
+        building_id: str,
+        normalizer: Callable[[np.ndarray], np.ndarray] | None = None,
+    ) -> float:
+        """Evaluate policy on target building (full episode).
+
+        Args:
+            dyna: Trained DynaSAC instance.
+            building_id: Building id (used by adapter mode).
+            normalizer: Optional override for obs normalization. Defaults to
+                self._normalize (source obs_mean/std). Scratch baseline must
+                pass a target-stats normalizer to match its training space.
+        """
+        normalize_fn = normalizer if normalizer is not None else self._normalize
         env_name = self.target_config["env_name"]
         with sinergym_workdir():
             env = gymnasium.make(env_name)
         raw_obs, _ = env.reset(seed=self.seed + 200)
-        obs = self._normalize(raw_obs)
+        obs = normalize_fn(raw_obs)
 
         total_reward = 0.0
         done = False
@@ -839,7 +924,7 @@ class FewShotTransferExperiment:
             action = dyna.select_action(obs, deterministic=True)
             raw_next, reward, term, trunc, _ = env.step(action)
             done = term or trunc
-            obs = self._normalize(raw_next)
+            obs = normalize_fn(raw_next)
             total_reward += float(reward)
 
         env.close()

@@ -28,12 +28,15 @@ DAYS = [1, 3, 7]
 DEFAULT_SEEDS = [42, 123, 7]
 
 # Experiment conditions: (label, use_context_gating, fine_tune)
+# NOTE: "no_encoder_ft" replaces previous "zeroshot" — these conditions
+# skip encoder fine-tuning but still adapt actor/critic on target data.
+# True zero-shot is in pure_zero_shot.
 CONDITIONS = [
     ("scratch", None, None),  # baseline
-    ("context", False, True),  # current default
-    ("context_gated", True, True),  # with gating
-    ("zeroshot", False, False),  # zero-shot, no gating
-    ("zeroshot_gated", True, False),  # zero-shot, with gating
+    ("context", False, True),  # full pipeline
+    ("context_gated", True, True),  # full pipeline with gating
+    ("no_encoder_ft", False, False),  # no encoder ft, no gating
+    ("no_encoder_ft_gated", True, False),  # no encoder ft, with gating
 ]
 
 
@@ -105,7 +108,7 @@ def main():
             )
 
             # Use run_ablation with appropriate condition
-            cond = "context" if fine_tune else "zero_shot"
+            cond = "context" if fine_tune else "no_encoder_ft"
             results = experiment.run_ablation(conditions=[cond])
 
             # Rename keys to include label
