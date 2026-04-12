@@ -315,9 +315,10 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - `ContextDynamicsModel`：完整 context-conditioned 动力学模型
 - `ContextWorldModelTrainer`：分离 context/encoder/dict 学习率
 
-**Transfer 方式**：
-- Zero-shot：从 target 数据采样 K=10 条 transition → infer_context → z_target
-- Few-shot（数据 >= 50 步时）：在 target 数据上微调 context encoder 20 epochs
+**Transfer 方式**（Phase 7 修正后的准确描述）：
+- Pure zero-shot：source actor 直接评估 target 建筑，无任何 adaptation
+- No-encoder-ft：推断 context z_target，跳过 encoder 微调，但仍做 SAC adaptation + rollout
+- Full context：推断 context + 微调 context encoder 20 epochs + SAC adaptation
 - 无需 adapter 管理、无需 warm-start、无需 freeze/unfreeze
 
 **结果（3 Seed: 42/123/7, Context Mode, Source-Only Dict, train_ratio=0.8, 零泄露）**：
@@ -339,6 +340,39 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - **所有 9 个 seed×day 组合 Transfer 全部赢 Scratch**（min=+39.1%, max=+66.9%）
 - 架构大幅简化：消除 ModuleDict、building_id 路由、adapter 管理
 - 论文叙事：「连续建筑热指纹 z 替代离散 adapter，实现 zero-shot 迁移，无任何数据泄露」
+
+#### 迭代 7：Unified Experiment 与 Pure Zero-Shot 发现（2026-04-12）
+
+**动机**：Phase 6 后引入 zero-shot 分支和 context-to-sparse gating（I1），但 2026-04-11 独立审查发现三个协议级问题：
+1. (F2) scratch 基线归一化空间错配（source-normalized states + target obs_mean/std for reward estimator）
+2. (F1) "zero_shot" 命名不准确（实际仍跑 200 SAC updates + target rollout）
+3. (F3) gating 初始化非中性（sigmoid(0)=0.5 把 alpha 减半）
+
+此外，两次分离实验（ablation + gating）在同 seed 下给出不同结果，原因是各自独立训练 source 和收集 target data，非公平对比。
+
+**修复**：
+- F2: scratch 用 raw_states + target stats 重新归一化，`_evaluate_on_target` 接受 normalizer 参数
+- F1.a: `zero_shot` → `no_encoder_ft`（命名诚实化）
+- F1.b: 新增 `_run_pure_zero_shot`: source actor 直接评估，assert 权重不变
+- F3: gating bias 初始化 +5.0（sigmoid(5)≈0.993）
+
+**统一实验设计**：
+- 每 seed: 1 ungated source + 1 gated source + 1 target data（共享）
+- 7 条件: scratch / pure_zero_shot / pure_zero_shot_gated / no_encoder_ft / no_encoder_ft_gated / context / context_gated
+- Seeds: 42, 123, 7
+
+**结果**（见 §3.2 完整表格）：
+- **Pure zero-shot: -6,788±388 (+67.6% vs scratch)** — 绝对最优
+- 所有 target adaptation 方法 (-8,740 ~ -10,244) 都显著差于 pure zero-shot
+- Gating 在中性初始化后无一致改进
+
+**反转性发现**：之前认为 context+fine-tune 是核心方法，gating 是创新点。修复协议后发现：
+- Pure zero-shot（source actor 零适应）碾压所有 adaptation 方法
+- Target adaptation 在 few-shot regime 下反生产
+- Gating 正向结果来自 F3 非中性初始化的伪阳性
+
+**新论文叙事方向**：
+> "Context-conditioned shared-dictionary world models enable effective zero-shot transfer for building HVAC control. Source-trained policies generalize directly to unseen buildings without target-data fine-tuning. Surprisingly, additional few-shot adaptation is counter-productive in our setting, as the limited target data causes overfitting that degrades the already well-generalizing source policy."
 
 ---
 
@@ -362,15 +396,34 @@ Applied Energy（首选）/ AAAI 2027（备选）
 | Shared D (预训练) | **-6958** | -5499 | **Ep1 +5.2%** (sample efficiency) |
 | Independent D (随机) | -7340 | **-5345** | Ep3 -2.8% (充分训练后独立更优) |
 
-### 3. Few-shot Transfer：Source→Target（3-seed, 零泄露）
+### 3. Few-shot Transfer：Source→Target（3-seed）
+
+#### 3.1 历史迭代对比（早期结果，存在已知协议问题，仅供参考）
 
 | 方法 | 1d 优势 | 3d 优势 | 7d 优势 | 架构 |
 |------|---------|---------|---------|------|
 | Adapter fine-tune | +56.9±5.4% | +30.3±2.3% | +29.6±11.6% | ModuleDict + building_id |
 | Context (Phase 4 原始) | +59.9±5.1% | +56.6±6.3% | +39.7±0.8% | ContextEncoder + z∈R^16 |
-| **Context (Phase 6 调优)** | **+70.7±4.0%** | **+52.8±2.5%** | **+64.4±5.1%** | 冻结字典 + 全数据 context |
+| Context (Phase 6 调优) | +70.7±4.0% | +52.8±2.5% | +64.4±5.1% | 冻结字典 + 全数据 context |
 
-Phase 6 调优改动：① 冻结字典保护 source 知识 ② 全数据 context 推断 ③ 固定 SAC 200 步
+> **注**：上述结果存在已知协议问题（F2: scratch 归一化错配、F1: zero-shot 命名不准），已被下方 Phase 7 unified 实验替代。详见 `docs/_dev/reviews/2026-04-11_zero_shot_gating_review.md`。
+
+#### 3.2 Unified 实验最终结果（Phase 7, 3-seed, 同 seed 共享 source+target, 2026-04-12）
+
+| 条件 | 说明 | 1d Adv | 3d Adv | 7d Adv | Mean Reward |
+|------|------|--------|--------|--------|-------------|
+| scratch | 随机字典 + target 数据, 无迁移 | — | — | — | -20,689~-21,266 |
+| **pure_zero_shot** | **source actor 直接评估, 无任何 target adaptation** | **+67.9±3.0%** | **+67.8±0.9%** | **+67.1±2.6%** | **-6,788±388** |
+| pure_zero_shot_gated | 同上, gated source | +67.0±3.3% | +66.9±1.7% | +66.3±1.1% | -6,972±261 |
+| no_encoder_ft | 跳过 encoder 微调, 仍做 SAC adaptation + rollout | +57.9±3.9% | +54.9±3.1% | +52.2±1.6% | -8,959~-9,900 |
+| context | 完整管线 (inference + encoder ft + SAC) | +51.7±4.6% | +56.4±1.7% | +54.5±4.4% | -9,209~-10,244 |
+| context_gated | 完整管线 + context-to-sparse gating | +58.8±3.2% | +58.4±2.9% | +52.2±3.0% | -8,740~-9,900 |
+
+**公平性保障**：
+- 每个 seed 的 ungated source 训练一次, 用于 scratch/pure_zero_shot/no_encoder_ft/context
+- 每个 seed 的 gated source 训练一次, 用于 *_gated 条件
+- target 数据每 seed 收集一次, 所有条件共享同一份 target data
+- scratch 使用 target 自身的 obs_mean/obs_std 重新归一化 (修复 F2)
 
 ### 4. 消融实验汇总
 
@@ -413,13 +466,42 @@ Phase 6 调优改动：① 冻结字典保护 source 知识 ② 全数据 contex
 
 **结论**：Transfer 优势 (~60%) **全部来自 SAC policy 权重迁移**，WM rollout 在 transfer 和 source 阶段均无显著贡献。
 
+#### 4.5 Target Adaptation 反生产消融（Phase 7, 3-seed unified, 2026-04-12）
+
+| 条件 | 做了什么 | Mean Reward | vs Scratch |
+|------|---------|-------------|------------|
+| pure_zero_shot | 无任何 target adaptation | **-6,788** | **+67.6%** |
+| + actor/critic adaptation (no_encoder_ft) | 200 SAC updates + model rollout | -9,454 | +55.0% |
+| + encoder fine-tune (context) | 20 epoch encoder ft + 上述 | -9,620 | +54.2% |
+
+**反直觉发现：每增加一层 target adaptation，效果反而下降。**
+
+原因分析：
+1. Source (hot+mixed) 已覆盖较宽的天气/负载分布，source actor 本身已可泛化
+2. few-shot target data (96~672 步) 太少，SAC 200 步更新使 actor 过拟合到噪声
+3. encoder fine-tune 进一步偏离 source 学到的稳定表征
+4. 与 §4.4 一致：Transfer 优势 100% 来自 source policy weights，而非 target adaptation
+
+#### 4.6 Context-to-Sparse Gating 消融（Phase 7, 3-seed unified, 2026-04-12）
+
+| 对比 | 1d | 3d | 7d | 结论 |
+|------|----|----|----|----|
+| pure_zero_shot vs _gated | -6788 vs -6972 | 同 | 同 | ≈无差异 |
+| no_encoder_ft vs _gated | -8959 vs -9010 | -9502 vs -9538 | -9900 vs -9895 | ≈无差异 |
+| context vs _gated | -10244 vs **-8740** | -9209 vs **-8793** | **-9407** vs -9900 | 1d/3d 有利, 7d 退化 |
+
+**结论**：Gating 在中性初始化（bias=+5, sigmoid≈0.993）后**不是可靠的改进**。仅在 context+ft 的 1d 场景显示 +7.1pp 收益，但 7d 退化 -2.3pp。作为方法创新点证据不足。
+
 ### 5. 核心发现
 
-1. **字典微调是关键**：冻结字典 → 训练崩溃 (-114%)，但预训练 D vs 随机 D 几乎无差 (+0.5%)
-2. **WM 精度 ≠ RL 性能**：离线 MSE 改善不等于在线 RL 改善（LayerNorm: MSE -5.2%, Ep3 -7.9%）
-3. **Transfer 优势来自 policy 而非 rollout**：消融证明 WM rollout 贡献为零，~60% 优势 100% 来自 source-trained actor/critic
-4. **Context > Adapter**：连续 z ∈ R^16 替代离散 adapter，1d +70.7%, 7d +64.4%
-5. **WM 的实际价值**：提供统一的跨建筑表征框架，使得同一 policy 能泛化到不同建筑
+1. **Pure Zero-Shot 迁移是最优策略**：source-trained actor 直接应用于 target 建筑，无需任何 target adaptation，获得 **+67.6%** vs scratch 的优势。这比所有 target adaptation 方法（no_encoder_ft +55%, context +54%）都要好 ~13pp。(Phase 7 unified, 3-seed)
+2. **Target Adaptation 反生产**：在 few-shot regime (96~672 步) 下，每增加一层 target adaptation (SAC update, encoder fine-tune) 效果反而下降。原因是少量 target data 使 actor 过拟合，偏离 source 学到的泛化表征。(§4.5)
+3. **Transfer 优势来自 policy 而非 rollout**：消融证明 WM rollout 贡献为零，~60% 优势 100% 来自 source-trained actor/critic。(§4.4)
+4. **WM 的实际价值**：world model 本身对 Dyna planning 的直接贡献有限 (~2%)，但 context-conditioned shared dictionary 提供统一的跨建筑表征框架，使得同一 source policy 能直接泛化到不同建筑。WM 是表征学习工具，而非 planning 工具。
+5. **Context > Adapter**：连续 z ∈ R^16 替代离散 adapter，架构更简洁，Transfer 更稳定。
+6. **Gating 不是可靠创新**：context-to-sparse gating（中性初始化后）在 unified 实验中无一致性改进。(§4.6)
+7. **字典微调是关键**：冻结字典 → 训练崩溃 (-114%)，但预训练 D vs 随机 D 几乎无差 (+0.5%)
+8. **WM 精度 ≠ RL 性能**：离线 MSE 改善不等于在线 RL 改善（LayerNorm: MSE -5.2%, Ep3 -7.9%）
 
 ---
 
