@@ -228,11 +228,17 @@ class UniversalSACTrainer:
 
         The same obs_encoder encodes the new building's raw obs into
         embed space, and the source-trained actor produces actions.
+        Actions are clipped to the target env's valid range to handle
+        cross-building action space differences.
         """
         with sinergym_workdir():
             env = gymnasium.make(env_name)
         obs_vars = list(env.unwrapped.observation_variables)
         target_mapping = build_category_mapping(building_id, obs_vars)
+
+        # Target env action bounds (may differ from source)
+        act_low = env.action_space.low  # ty: ignore[unresolved-attribute]
+        act_high = env.action_space.high  # ty: ignore[unresolved-attribute]
 
         rewards: list[float] = []
         for ep in range(n_episodes):
@@ -247,6 +253,8 @@ class UniversalSACTrainer:
                     embed = self.obs_encoder(raw_t, target_mapping)
                     action = self.actor.get_action(embed)
                 action = action.cpu().numpy().squeeze(0)
+                # Clip to target env's valid action range
+                action = np.clip(action, act_low, act_high)
                 raw_obs, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
                 episode_reward += float(reward)
