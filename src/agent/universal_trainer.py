@@ -8,6 +8,12 @@ with a different obs_dim.
 No world model / Dyna rollouts — Phase 7 showed WM rollout contributes ~0%
 to transfer performance, and reward estimation in embed space is non-trivial.
 Pure SAC in embed space is sufficient for the transfer experiment.
+
+ENCODER TRAINING (fixed 2026-04-14): The replay buffer stores RAW obs,
+and the encoder is re-invoked with gradients during SAC updates. This
+allows encoder parameters to be trained end-to-end with actor/critic
+losses. Previously the encoder was forward-only (detach before buffer)
+and received no gradient updates.
 """
 
 import contextlib
@@ -18,6 +24,7 @@ from pathlib import Path
 import gymnasium
 import numpy as np
 import torch
+import torch.nn.functional as F
 from loguru import logger
 
 from src.agent.replay_buffer import ReplayBuffer
@@ -50,7 +57,9 @@ class UniversalSACTrainer:
         eval_freq: Steps between evaluations.
         save_dir: Output directory.
         device: Torch device string.
-        train_encoder: If True, encoder gradients flow during SAC training.
+        train_encoder: If True, encoder is trained end-to-end with SAC.
+            If False, encoder is used in eval mode only (gradient blocked).
+        encoder_lr: Learning rate for encoder optimizer when train_encoder=True.
     """
 
     def __init__(
@@ -69,6 +78,7 @@ class UniversalSACTrainer:
         save_dir: str = "output/results/universal_sac",
         device: str = "auto",
         train_encoder: bool = True,
+        encoder_lr: float = 3e-4,
     ) -> None:
         self.env_name = env_name
         self.building_id = building_id
@@ -77,6 +87,7 @@ class UniversalSACTrainer:
         self.batch_size = batch_size
         self.learning_starts = learning_starts
         self.eval_freq = eval_freq
+        self.gamma = gamma
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.device = get_device(device)
@@ -88,7 +99,7 @@ class UniversalSACTrainer:
         # Create env and probe dims
         with sinergym_workdir():
             self.env = gymnasium.make(env_name)
-        raw_obs_dim = self.env.observation_space.shape[0]  # ty: ignore[not-subscriptable]
+        self.raw_obs_dim = self.env.observation_space.shape[0]  # ty: ignore[not-subscriptable]
         self.action_dim = self.env.action_space.shape[0]  # ty: ignore[not-subscriptable]
 
         action_low = self.env.action_space.low  # ty: ignore[unresolved-attribute]
@@ -100,7 +111,7 @@ class UniversalSACTrainer:
         obs_vars = list(self.env.unwrapped.observation_variables)
         self.mapping = build_category_mapping(building_id, obs_vars)
         logger.info(
-            f"Building {building_id}: raw_obs_dim={raw_obs_dim}, "
+            f"Building {building_id}: raw_obs_dim={self.raw_obs_dim}, "
             f"categories={dict_summary(self.mapping)}"
         )
 
@@ -136,24 +147,107 @@ class UniversalSACTrainer:
             device=self.device,
         )
 
-        self.buffer = ReplayBuffer(buffer_size, self.embed_dim, self.action_dim)
+        # Encoder optimizer (only used when train_encoder=True)
+        if self.train_encoder:
+            self.encoder_optimizer: torch.optim.Optimizer | None = torch.optim.Adam(
+                self.obs_encoder.parameters(), lr=encoder_lr
+            )
+        else:
+            self.encoder_optimizer = None
+            # Freeze encoder parameters
+            for p in self.obs_encoder.parameters():
+                p.requires_grad_(False)
 
-    def _encode(self, raw_obs: np.ndarray) -> np.ndarray:
-        """Encode raw obs to embed space."""
+        # Buffer stores RAW obs (not embeddings) so encoder can be
+        # re-invoked with gradients during SAC updates.
+        self.buffer = ReplayBuffer(buffer_size, self.raw_obs_dim, self.action_dim)
+
+    def _encode_for_action(self, raw_obs: np.ndarray) -> torch.Tensor:
+        """Encode raw obs for action selection (no gradient needed)."""
         raw_t = torch.tensor(
             raw_obs, dtype=torch.float32, device=self.device
         ).unsqueeze(0)
-        if self.train_encoder:
+        with torch.no_grad():
             embed = self.obs_encoder(raw_t, self.mapping)
-        else:
-            with torch.no_grad():
-                embed = self.obs_encoder(raw_t, self.mapping)
-        return embed.squeeze(0).cpu().detach().numpy()
+        return embed
+
+    def _update_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
+        """SAC update step with encoder gradient flow.
+
+        Re-encodes raw states with gradients so encoder receives
+        combined gradients from both critic and actor losses.
+        """
+        raw_states = batch["states"]
+        raw_next_states = batch["next_states"]
+        actions = batch["actions"]
+        rewards = batch["rewards"]
+        dones = batch["dones"]
+
+        # === Critic update ===
+        states = self.obs_encoder(raw_states, self.mapping)
+
+        with torch.no_grad():
+            next_states_ng = self.obs_encoder(raw_next_states, self.mapping)
+            next_actions, next_log_probs = self.actor(next_states_ng)
+            q1_next, q2_next = self.critic_target(next_states_ng, next_actions)
+            q_next = (
+                torch.min(q1_next, q2_next)
+                - self.sac_trainer.alpha * next_log_probs
+            )
+            target_q = rewards + (1.0 - dones) * self.gamma * q_next
+
+        q1, q2 = self.critic(states, actions)
+        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
+
+        self.sac_trainer.critic_optimizer.zero_grad()
+        if self.encoder_optimizer is not None:
+            self.encoder_optimizer.zero_grad()
+        critic_loss.backward()
+        self.sac_trainer.critic_optimizer.step()
+        # Keep encoder grads (from critic path); don't step yet
+
+        # === Actor update (re-encode for fresh graph) ===
+        states_actor = self.obs_encoder(raw_states, self.mapping)
+        new_actions, log_probs = self.actor(states_actor)
+        q1_new, q2_new = self.critic(states_actor, new_actions)
+        q_new = torch.min(q1_new, q2_new)
+        actor_loss = (self.sac_trainer.alpha.detach() * log_probs - q_new).mean()
+
+        self.sac_trainer.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.sac_trainer.actor_optimizer.step()
+        # Encoder now has combined grads from critic + actor
+
+        # Step encoder with combined gradients
+        if self.encoder_optimizer is not None:
+            self.encoder_optimizer.step()
+            self.encoder_optimizer.zero_grad()
+
+        # === Alpha update ===
+        alpha_loss = 0.0
+        if self.sac_trainer.autotune_alpha:
+            alpha_loss_t = (
+                -self.sac_trainer.log_alpha.exp()
+                * (log_probs.detach() + self.sac_trainer.target_entropy)
+            ).mean()
+            self.sac_trainer.alpha_optimizer.zero_grad()
+            alpha_loss_t.backward()
+            self.sac_trainer.alpha_optimizer.step()
+            alpha_loss = alpha_loss_t.item()
+
+        # === Target soft update ===
+        self.sac_trainer._soft_update()
+
+        return {
+            "critic_loss": critic_loss.item(),
+            "actor_loss": actor_loss.item(),
+            "alpha_loss": alpha_loss,
+            "alpha": self.sac_trainer.alpha.item(),
+        }
 
     def train(self) -> dict:
-        """Run SAC training in embed space."""
+        """Run SAC training with proper encoder gradient flow."""
         raw_obs, _ = self.env.reset(seed=self.seed)
-        obs = self._encode(raw_obs)
         episode_reward = 0.0
         episode_count = 0
         episode_rewards: list[float] = []
@@ -162,27 +256,25 @@ class UniversalSACTrainer:
 
         logger.info(
             f"Training {self.building_id}: {self.total_timesteps} steps, "
-            f"embed_dim={self.embed_dim}"
+            f"embed_dim={self.embed_dim}, train_encoder={self.train_encoder}"
         )
 
         for step in range(1, self.total_timesteps + 1):
             if step < self.learning_starts:
                 action = self.env.action_space.sample()
             else:
-                state_t = torch.tensor(
-                    obs, dtype=torch.float32, device=self.device
-                ).unsqueeze(0)
+                embed = self._encode_for_action(raw_obs)
                 with torch.no_grad():
-                    action, _ = self.actor(state_t)
+                    action, _ = self.actor(embed)
                 action = action.cpu().numpy().squeeze(0)
 
             raw_next, reward, terminated, truncated, _ = self.env.step(action)
             done = terminated or truncated
-            next_obs = self._encode(raw_next)
 
-            self.buffer.add(obs, action, float(reward), next_obs, done)
+            # Store RAW observations, not embeddings
+            self.buffer.add(raw_obs, action, float(reward), raw_next, done)
             episode_reward += float(reward)
-            obs = next_obs
+            raw_obs = raw_next
 
             if done:
                 episode_count += 1
@@ -194,17 +286,10 @@ class UniversalSACTrainer:
                 )
                 episode_reward = 0.0
                 raw_obs, _ = self.env.reset()
-                obs = self._encode(raw_obs)
 
             if step >= self.learning_starts and len(self.buffer) >= self.batch_size:
                 batch = self.buffer.sample(self.batch_size, self.device)
-                self.sac_trainer.update(
-                    batch["states"],
-                    batch["actions"],
-                    batch["rewards"],
-                    batch["next_states"],
-                    batch["dones"],
-                )
+                self._update_step(batch)
 
             if step % self.eval_freq == 0 and recent_rewards:
                 rewards = np.array(recent_rewards)
@@ -222,7 +307,7 @@ class UniversalSACTrainer:
         return {"episode_rewards": episode_rewards, "eval_history": eval_history}
 
     def evaluate_on_env(
-        self, env_name: str, building_id: str, n_episodes: int = 1
+        self, env_name: str, building_id: str, n_episodes: int = 3
     ) -> dict:
         """Evaluate actor on a (potentially different) building.
 
@@ -230,6 +315,11 @@ class UniversalSACTrainer:
         embed space, and the source-trained actor produces actions.
         Actions are clipped to the target env's valid range to handle
         cross-building action space differences.
+
+        Args:
+            env_name: Gym/Sinergym env name.
+            building_id: Building identifier for CategoryMapping.
+            n_episodes: Number of eval episodes (default 3 for robustness).
         """
         with sinergym_workdir():
             env = gymnasium.make(env_name)
@@ -253,7 +343,6 @@ class UniversalSACTrainer:
                     embed = self.obs_encoder(raw_t, target_mapping)
                     action = self.actor.get_action(embed)
                 action = action.cpu().numpy().squeeze(0)
-                # Clip to target env's valid action range
                 action = np.clip(action, act_low, act_high)
                 raw_obs, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
@@ -279,6 +368,7 @@ class UniversalSACTrainer:
                 "obs_encoder": self.obs_encoder.state_dict(),
                 "building_id": self.building_id,
                 "embed_dim": self.embed_dim,
+                "train_encoder": self.train_encoder,
             },
             self.save_dir / "checkpoint.pt",
         )
