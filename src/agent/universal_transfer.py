@@ -100,35 +100,55 @@ class UniversalTransferExperiment:
         return results
 
     def _train_source(self) -> UniversalSACTrainer:
-        """Train SAC on source buildings sequentially."""
-        trainer = None
-        for cfg in self.source_configs:
+        """Train SAC on source buildings sequentially.
+
+        Inherits actor/critic/buffer state across buildings so training
+        progress accumulates (previously each new trainer started fresh,
+        losing the first building's training).
+        """
+        prev_trainer: UniversalSACTrainer | None = None
+        for i, cfg in enumerate(self.source_configs):
             bid = cfg["building_id"]
             env_name = cfg["env_name"]
-            logger.info(f"Training on source: {bid}")
+            logger.info(f"Training on source {i + 1}/{len(self.source_configs)}: {bid}")
 
+            # Each building gets a trainer scoped to its env, but inherits
+            # learned parameters from the previous building.
             trainer = UniversalSACTrainer(
                 env_name=env_name,
                 building_id=bid,
                 obs_encoder=self.obs_encoder,
-                seed=self.seed,
+                seed=self.seed + i,  # vary seed per building to diversify buffer
                 total_timesteps=self.total_timesteps,
                 hidden_dims=self.hidden_dims,
                 save_dir=str(self.save_dir / f"source_{bid}"),
                 device=self.device,
                 train_encoder=True,
             )
+
+            # Inherit actor/critic/buffer from previous building
+            if prev_trainer is not None:
+                trainer.actor.load_state_dict(prev_trainer.actor.state_dict())
+                trainer.critic.load_state_dict(prev_trainer.critic.state_dict())
+                trainer.critic_target.load_state_dict(
+                    prev_trainer.critic_target.state_dict()
+                )
+                # Carry replay buffer for cross-building sample efficiency
+                trainer.buffer = prev_trainer.buffer
+                # Keep optimizer states from SACTrainer (inherit from prev)
+                trainer.sac_trainer.actor_optimizer.load_state_dict(
+                    prev_trainer.sac_trainer.actor_optimizer.state_dict()
+                )
+                trainer.sac_trainer.critic_optimizer.load_state_dict(
+                    prev_trainer.sac_trainer.critic_optimizer.state_dict()
+                )
+                logger.info("  Inherited state from previous source trainer")
+
             trainer.train()
+            prev_trainer = trainer
 
-            # For multi-source: carry actor/critic/encoder to next building
-            if len(self.source_configs) > 1:
-                # Save state for next building's trainer to inherit
-                self._last_actor_state = trainer.actor.state_dict()
-                self._last_critic_state = trainer.critic.state_dict()
-                self._last_critic_target_state = trainer.critic_target.state_dict()
-
-        assert trainer is not None
-        return trainer
+        assert prev_trainer is not None
+        return prev_trainer
 
     def _train_scratch(self, target_config: dict) -> float:
         """Train from scratch on target building."""
