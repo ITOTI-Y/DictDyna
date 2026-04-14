@@ -374,6 +374,52 @@ Applied Energy（首选）/ AAAI 2027（备选）
 **新论文叙事方向**：
 > "Context-conditioned shared-dictionary world models enable effective zero-shot transfer for building HVAC control. Source-trained policies generalize directly to unseen buildings without target-data fine-tuning. Surprisingly, additional few-shot adaptation is counter-productive in our setting, as the limited target data causes overfitting that degrades the already well-generalizing source policy."
 
+#### 迭代 8：Path B 异构建筑扩展尝试与失败（2026-04-13 ~ 04-14）
+
+**动机**：Phase 7 的 pure zero-shot 在 3 个 5zone 建筑（仅天气不同、obs/action/reward 完全相同）之间成功 +67%。2026-04-12 审查指出这些建筑"太相似"，不足以支撑论文级 transfer 贡献。决定探索异构建筑（warehouse 22d, shop 34d 等）。
+
+**Path B 架构**：`UniversalObsEncoder` — 按物理类别（TIME/WEATHER/ZONE_TEMP/ZONE_HUMID/OCCUPANCY/SETPOINT/POWER/OTHER）拆分 obs，每类一个固定 MLP + pad/mask 处理不同建筑的变量数。所有建筑 encode 到 128 维共享 embedding，actor/critic 在 embedding 空间操作。
+
+**实现版本**：
+- v1 (35040 steps, 2026-04-13): 跨 seed 数值完全重复，3 个 target 中 seed 42 部分成功，其他灾难失败
+- v2 (70080 steps + source 累积修复, 2026-04-13): warehouse -464%, shop -146%，**warehouse_hot 稳定失败**
+
+**2026-04-13 审查发现的 3 个严重问题**：
+1. **Encoder 从未训练**: `_encode()` 中 `.detach()` 切断梯度，buffer 存 numpy 张量，SAC 训练时 encoder 零梯度更新。验证方法：对比 3 seed 的 source_5zone_hot 和 source_5zone_mixed checkpoints，encoder 权重完全一致
+2. **Action transfer 只有 clip**: 没有 action adapter/remapping/decoder。source (5zone [12, 23.25] × [23.25, 30]) 的饱和 action 被 clip 到 target (warehouse [15, 22.5] × [22.5, 35]) 后语义扭曲
+3. **单 episode deterministic eval**: Sinergym 固定 TMY3 天气 + 确定性 actor → seed 间 reward 完全相同（到小数点）
+
+**修复后验证实验（2026-04-14, 5zone 同 action space 内部）**：
+
+| Seed | random_frozen | trained | scratch |
+|------|---------------|---------|---------|
+| 42 | -13716 | **-13716** | -31903 |
+| 123 | -31903 | -33161 | -33161 |
+| 7 | -33161 | -32504 | -30808 |
+
+**决定性 negative result**：
+- random_frozen 均值 **-26260** vs trained 均值 **-26460** → **encoder 训练反而略差**
+- 3 个 eval episodes 全部产生完全相同 reward（std=0）→ Sinergym 环境本质确定性
+- trained vs scratch 平均 +21% 优势几乎全部来自 seed 42 单点幸运，seed 123/7 几乎相等
+
+**触发审查设定的终止条件**：
+> "如果 5zone_hot/mixed → 5zone_cool 仍无法证明 encoder 带来稳定增益，则应把 Path B 降级为负结果"
+
+**结论（诚实记录）**：
+- `UniversalObsEncoder` 的 per-category + pad/mask 设计**不能自动对齐跨建筑控制策略语义**
+- 即使 encoder 真正训练（已验证），也不能给 transfer 带来一致性增益
+- 跨建筑 action space 的 clip-only transfer 在异构场景下不可行
+- Sinergym 的确定性 TMY3 天气 + 确定性策略 eval 使 seed 方差被虚假放大（eval 协议脆弱）
+
+**Path B 降级为负结果**，不作为论文主线。本次发现作为诚实技术记录保留在 `src/agent/universal_trainer.py`、`scripts/run_encoder_validation.py`、`docs/_dev/reviews/2026-04-13_path_b_heterogeneous_transfer_review.md`。
+
+**论文恢复原主线**：3 个 5zone 建筑跨气候 transfer，明确界定"同类型跨气候"scope，不主张跨建筑类型 generalization。
+
+**未来探索方向**（不在当前论文范围）：
+- Shared latent policy + per-building action decoder（审查建议的下一版架构）
+- 使用 Sinergym stochastic 变体打破确定性评估
+- 自监督预训练 encoder（重构或预测下一状态任务）后再 SAC
+
 ---
 
 ## Results
@@ -502,6 +548,7 @@ Applied Energy（首选）/ AAAI 2027（备选）
 6. **Gating 不是可靠创新**：context-to-sparse gating（中性初始化后）在 unified 实验中无一致性改进。(§4.6)
 7. **字典微调是关键**：冻结字典 → 训练崩溃 (-114%)，但预训练 D vs 随机 D 几乎无差 (+0.5%)
 8. **WM 精度 ≠ RL 性能**：离线 MSE 改善不等于在线 RL 改善（LayerNorm: MSE -5.2%, Ep3 -7.9%）
+9. **论文 scope 限定为同类型跨气候**：异构建筑扩展（Path B, 迭代 8）负结果明确 — per-category pad/mask encoder 不能自动对齐跨建筑控制语义，clip-only action transfer 在异构场景失败，Sinergym 确定性环境使 eval 协议脆弱。结论：DictDyna 主张"同建筑类型（5zone office）跨气候 transfer"，不主张跨建筑类型 generalization。
 
 ---
 
