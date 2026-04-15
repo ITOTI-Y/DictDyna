@@ -1,0 +1,14 @@
+{
+  "controller": "sinergym.utils.controllers.RBC5Zone",
+  "basis": "ASHRAE Standard 55-2004",
+  "setpoints_summer": [23.0, 26.0],
+  "setpoints_winter": [20.0, 23.5],
+  "seed": 42,
+  "n_episodes": 1,
+  "rewards": {
+    "5zone_hot": -3750.4,
+    "5zone_mixed": -4121.7,
+    "5zone_cool": -3609.2
+  },
+  "source": "output captured from docker run of scripts/run_rbc_baseline.py on 2026-04-14"
+}

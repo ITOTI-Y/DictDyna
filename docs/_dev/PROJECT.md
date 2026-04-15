@@ -420,6 +420,71 @@ Applied Energy（首选）/ AAAI 2027（备选）
 - 使用 Sinergym stochastic 变体打破确定性评估
 - 自监督预训练 encoder（重构或预测下一状态任务）后再 SAC
 
+#### 迭代 9：RBC baseline 修正与论文主张崩塌（2026-04-14）
+
+**起因**：用户质疑"跨气候 transfer"的合理性。深入分析后发现：
+1. T1.1 / T1.3 已证 3 栋 5zone 建筑 reward 函数**完全相同**（month-based comfort band，与气候无关）
+2. f1/f2 验证实验证实 actor 学到的是 `f1: month → setpoint`（与 outdoor 气候无关，counterfactual 测试显示 cooling_sp 仅变化 0.06°C）
+3. 气候分布验证：3 栋建筑 outdoor_temp 差异巨大（hot 21.7°C vs cool 9.3°C 均温），但 actor 输出几乎相同
+4. 结论：**"跨气候 transfer" 不是知识迁移**，而是 reward 设计导致最优 setpoint 策略跨气候不变 + source 比 scratch 训练步数更多（sample efficiency）
+
+**灾难性发现**：检查 Sinergym 官方 `sinergym.utils.controllers.RBC5Zone` 源码发现，它是**基于 ASHRAE Standard 55-2004 的真正 RBC**，直接输出 reward 函数的 comfort band 边界：
+- Summer (Jun-Sep): `heating_sp=23, cooling_sp=26`（夏季 comfort 上界 → 最小 power + comfort 满足）
+- Winter (Oct-May): `heating_sp=20, cooling_sp=23.5`（冬季 comfort 上界）
+
+**我们之前用的 "RBC"** 是 `(action_low + action_high) / 2 = (17.625, 26.625)`，是一个**完全无视 reward 结构的常数中点控制器** — 全年输出同一个 setpoint，冬天夏天一样。这是一个**极弱的 straw-man baseline**。
+
+**真实 RBC baseline 结果**（seed=42，完整年度 episode）：
+
+| 建筑 | 常数中点 "RBC" (我们之前用的) | Sinergym 官方 RBC5Zone (真 baseline) |
+|------|------------------------------|--------------------------------------|
+| 5zone_hot | -18,397 | **-3,750** |
+| 5zone_mixed | — | **-4,122** |
+| 5zone_cool | — | **-3,609** |
+
+**用真 RBC 重估 DictDyna 所有结论**：
+
+| 方法 | Hot reward | vs 常数 RBC | vs 真 RBC | 诚实解读 |
+|------|-----------|-------------|-----------|---------|
+| 常数中点 "RBC" | -18,397 | — | — | 本来就是弱 baseline |
+| Sinergym RBC5Zone | -3,750 | +80% | — | **近最优，直接编码 comfort band** |
+| SAC baseline | -5,965 | +68% | **-59%** | **比真 RBC 更差** |
+| Dyna-SAC (Phase 2) | -5,470 | +70% | **-46%** | **比真 RBC 更差** |
+| Dyna-SAC 最优配置 | -5,051 | +73% | **-35%** | **比真 RBC 更差** |
+| Phase 7 pure_zero_shot (cool) | -6,788 | — | **-88%** | **比真 RBC 更差** |
+
+**Actor 学到的次优策略**：f1/f2 分析显示 SAC 学到的是 `cooling_sp ≈ 23.3`（全年恒定，无月份依赖），而最优应该是：
+- 夏天 cooling_sp = 26（comfort 上界最小 power）
+- 冬天 cooling_sp = 23.5（winter comfort 上界）
+
+Sinergym 官方 RBC 硬编码了这个 seasonal switch，我们的 SAC 学不到（可能因训练不足 / exploration 不足 / reward 尺度不平衡）。
+
+**为什么 Sinergym 官方 RBC 这么强**：
+```
+Reward = -0.5·λ_E·power - 0.5·λ_T·comfort_violation
+最优策略: setpoint = comfort band 边界 (W·power 最小, violation = 0)
+RBC5Zone: 直接输出 comfort band 边界
+```
+在这个 reward 设计下，**官方 RBC 结构性地接近全局最优**，任何 setpoint-based RL 都难以显著超越。
+
+**对论文主张的影响**（全部失效）：
+1. ❌ "Dyna-SAC +70% vs RBC" — 实际是 -46% vs 真 RBC
+2. ❌ "Pure zero-shot +67%" — 实际是 -88% vs 真 RBC（对比的 scratch 本身就次优）
+3. ❌ "Cross-climate transfer" — 非知识迁移，reward 设计副产品
+4. ❌ "Shared dictionary knowledge transfer" — WM rollout 贡献已经是零
+5. ❌ "Context-conditioned adaptation" — Context 不区分建筑（T1.4）
+
+**方法学教训**：
+1. **Baseline 必须 reward-aware**：我们早期用常数中点作 RBC 是方法学错误，真正的 baseline 应是 domain-specific rule（ASHRAE, DOE 等标准）
+2. **Sinergym 5zone 不是好的 RL 测试台**：reward 设计让 rule-based 几乎最优，RL 无法显示真实价值
+3. **论文应转向可证明价值的场景**：time-of-use pricing, demand response, 多目标 Pareto，或换平台（BOPTEST）
+
+**Path 9 结论**：在当前平台 + reward 函数下，**DictDyna 相对于真 RBC 没有正面数据**，论文应彻底重新定位，不能再声明方法性能优势。可能的诚实写法：
+
+1. **平台批判性论文**：分析 Sinergym 5zone 作为 RL benchmark 的局限（rule-based 太强，无显著 RL-RBC gap）
+2. **换实验场景重做**：加入 electricity pricing、多目标等让 RBC 失效的设计
+3. **方法学论文**：系统记录 "what doesn't work" 教训（negative results + 方法论缺陷）
+
 ---
 
 ## Results
@@ -540,15 +605,27 @@ Applied Energy（首选）/ AAAI 2027（备选）
 
 ### 5. 核心发现
 
-1. **Pure Zero-Shot 迁移是最优策略**：source-trained actor 直接应用于 target 建筑，无需任何 target adaptation，获得 **+67.6%** vs scratch 的优势。这比所有 target adaptation 方法（no_encoder_ft +55%, context +54%）都要好 ~13pp。(Phase 7 unified, 3-seed)
-2. **Target Adaptation 反生产**：在 few-shot regime (96~672 步) 下，每增加一层 target adaptation (SAC update, encoder fine-tune) 效果反而下降。原因是少量 target data 使 actor 过拟合，偏离 source 学到的泛化表征。(§4.5)
-3. **Transfer 优势来自 policy 而非 rollout**：消融证明 WM rollout 贡献为零，~60% 优势 100% 来自 source-trained actor/critic。(§4.4)
-4. **WM 的实际价值**：world model 本身对 Dyna planning 的直接贡献有限 (~2%)，但 context-conditioned shared dictionary 提供统一的跨建筑表征框架，使得同一 source policy 能直接泛化到不同建筑。WM 是表征学习工具，而非 planning 工具。
-5. **Context > Adapter**：连续 z ∈ R^16 替代离散 adapter，架构更简洁，Transfer 更稳定。
-6. **Gating 不是可靠创新**：context-to-sparse gating（中性初始化后）在 unified 实验中无一致性改进。(§4.6)
-7. **字典微调是关键**：冻结字典 → 训练崩溃 (-114%)，但预训练 D vs 随机 D 几乎无差 (+0.5%)
-8. **WM 精度 ≠ RL 性能**：离线 MSE 改善不等于在线 RL 改善（LayerNorm: MSE -5.2%, Ep3 -7.9%）
-9. **论文 scope 限定为同类型跨气候**：异构建筑扩展（Path B, 迭代 8）负结果明确 — per-category pad/mask encoder 不能自动对齐跨建筑控制语义，clip-only action transfer 在异构场景失败，Sinergym 确定性环境使 eval 协议脆弱。结论：DictDyna 主张"同建筑类型（5zone office）跨气候 transfer"，不主张跨建筑类型 generalization。
+> **注 (2026-04-14)**：下述 1-9 条基于错误的 RBC baseline (常数中点)。迭代 9 发现
+> **Sinergym 官方 RBC5Zone** 是真正 baseline，重估后全部方法相对性能均为负 (-35% ~ -88% vs 真 RBC)。
+> 以下原结论保留作历史记录，**实际结论见第 10 条**。
+
+1. **[已作废] Pure Zero-Shot 迁移是最优策略**：+67.6% vs scratch 的优势。~~迁移贡献~~ → 实际是 sample efficiency + f1 策略天然跨气候不变（f1/f2 验证）
+2. **Target Adaptation 反生产**：在 few-shot regime 下，每增加一层 target adaptation 效果反而下降
+3. **Transfer 优势来自 policy 而非 rollout**：消融证明 WM rollout 贡献为零
+4. **WM 的实际价值**：WM 对 Dyna planning 的直接贡献 ~2%（消融）
+5. **Context > Adapter**：连续 z ∈ R^16 替代离散 adapter，架构更简洁
+6. **Gating 不是可靠创新**：context-to-sparse gating 无一致性改进
+7. **字典微调是关键**：冻结字典 → 训练崩溃 (-114%)
+8. **WM 精度 ≠ RL 性能**：离线 MSE 改善 ≠ 在线 RL 改善
+9. **[已作废] 论文 scope 限定为同类型跨气候**：异构建筑扩展负结果 + 跨气候本身也不是真实迁移（reward 设计副产品）
+
+**10. [2026-04-14 最终发现] Sinergym 5zone 平台不适合证明 RL 超越 RBC**：
+   - Sinergym 官方 `RBC5Zone` 是基于 ASHRAE 55-2004 的 reward-aware 规则控制器（直接输出 comfort band 边界）
+   - 真 RBC reward: hot -3,750 / mixed -4,122 / cool -3,609
+   - 所有 DictDyna 方法在真 RBC 面前都是 **-35% 到 -88% 更差**
+   - 根本原因：Sinergym reward = `-power - comfort_violation`，setpoint 输出 comfort band 边界即最优，**ASHRAE RBC 结构性接近全局最优**
+   - **当前平台无法证明任何 RL 方法（含 DictDyna）的方法性能价值**
+   - 论文方向必须彻底重新定位：换平台 / 换 reward 设计 / 或转为平台批判 + 方法学教训论文
 
 ---
 
